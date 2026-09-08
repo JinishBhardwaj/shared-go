@@ -1,4 +1,4 @@
-.PHONY: help test test-cache test-cache-memory test-cache-rediscache test-health test-health-database test-identity test-problem build vet fmt lint
+.PHONY: help test test-authn test-authz test-cache test-cache-memory test-cache-rediscache test-health test-health-database test-identity test-problem build vet fmt lint
 
 GO_TEST := go test -count=1 -race
 
@@ -7,6 +7,12 @@ help: ## Show this help
 
 test: ## Run all package tests
 	$(GO_TEST) ./...
+
+test-authn: ## Run authn package tests
+	cd authn && $(GO_TEST) ./...
+
+test-authz: ## Run authz package tests
+	cd authz && $(GO_TEST) ./...
 
 test-cache: ## Run cache package tests
 	$(GO_TEST) ./cache

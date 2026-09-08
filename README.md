@@ -4,6 +4,8 @@ Module: `github.com/JinishBhardwaj/shared-go`
 
 ## Packages
 
+- **authn** — Pluggable authentication middleware for Gin (OIDC, JWT, API keys, ClaimsTransformer, Principal)
+- **authz** — Policy-based PARC authorization engine with L1/L2 tiered caching (Ristretto + Redis) and instant revocation
 - **health** — HTTP-agnostic health check registry
 - **health/database** — pgxpool health check
 - **identity** — request-scoped Actor context carrier
