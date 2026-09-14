@@ -9,6 +9,9 @@ type Requirement interface {
 	RequirementType() string
 }
 
+// AuthorizationRequirement is an ASP.NET Core naming alias for Requirement.
+type AuthorizationRequirement = Requirement
+
 // PARCRequirement enforces that the principal has permission to perform an Action on a ResourceType.
 type PARCRequirement struct {
 	Action       string
@@ -62,10 +65,16 @@ type Policy struct {
 	Requirements []Requirement
 }
 
+// AuthorizationPolicy is an ASP.NET Core naming alias for Policy.
+type AuthorizationPolicy = Policy
+
 // PolicyBuilder provides a fluent API for building policies, mirroring ASP.NET Core AuthorizationPolicyBuilder.
 type PolicyBuilder struct {
 	policy Policy
 }
+
+// AuthorizationPolicyBuilder is an ASP.NET Core naming alias for PolicyBuilder.
+type AuthorizationPolicyBuilder = PolicyBuilder
 
 // NewPolicy starts building a named authorization policy.
 func NewPolicy(name string) *PolicyBuilder {
@@ -75,6 +84,24 @@ func NewPolicy(name string) *PolicyBuilder {
 			Requirements: nil,
 		},
 	}
+}
+
+// NewPolicyBuilder creates an AuthorizationPolicyBuilder (mirrors ASP.NET Core AuthorizationPolicyBuilder).
+func NewPolicyBuilder(name ...string) *PolicyBuilder {
+	policyName := ""
+	if len(name) > 0 {
+		policyName = name[0]
+	}
+	return NewPolicy(policyName)
+}
+
+// RequireAuthenticatedUser asserts that the request has an authenticated caller.
+func (b *PolicyBuilder) RequireAuthenticatedUser() *PolicyBuilder {
+	return b.AddRequirement(CustomRequirement{
+		Func: func(ctx context.Context, req Request) bool {
+			return req.Principal.ID != ""
+		},
+	})
 }
 
 // RequirePARC asserts that the caller has PARC permission for the given action and resource type.

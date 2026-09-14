@@ -205,15 +205,127 @@ func (h *PARCHandler) Handle(ctx context.Context, p *authn.Principal, req Requir
 	return decision.Allowed, nil
 }
 
+// AuthorizationResult represents the outcome of an authorization evaluation (mirrors ASP.NET Core AuthorizationResult).
+type AuthorizationResult struct {
+	Succeeded     bool   `json:"succeeded"`
+	FailureReason string `json:"failure_reason,omitempty"`
+}
+
+// Result is an alias for AuthorizationResult.
+type Result = AuthorizationResult
+
+// SuccessResult returns a successful authorization result.
+func SuccessResult() AuthorizationResult {
+	return AuthorizationResult{Succeeded: true}
+}
+
+// FailedResult returns a failed authorization result with the given reason.
+func FailedResult(reason string) AuthorizationResult {
+	return AuthorizationResult{Succeeded: false, FailureReason: reason}
+}
+
+// ToDecision converts an AuthorizationResult to a legacy Decision.
+func (r AuthorizationResult) ToDecision() Decision {
+	return Decision{Allowed: r.Succeeded, Reason: r.FailureReason}
+}
+
+// ToResult converts a Decision to an AuthorizationResult.
+func (d Decision) ToResult() AuthorizationResult {
+	return AuthorizationResult{Succeeded: d.Allowed, FailureReason: d.Reason}
+}
+
 // PolicyEngine is the Policy Decision Point (PDP) that coordinates policy evaluation.
 // Mirrors ASP.NET Core IAuthorizationService.
 type PolicyEngine struct {
-	policies map[string]Policy
-	handlers map[string]RequirementHandler
+	policies       map[string]Policy
+	handlers       map[string]RequirementHandler
+	defaultPolicy  *Policy
+	fallbackPolicy *Policy
+}
+
+// AuthorizationService is an ASP.NET Core naming alias for PolicyEngine (IAuthorizationService).
+type AuthorizationService = PolicyEngine
+
+// Service is a convenient alias for AuthorizationService.
+type Service = PolicyEngine
+
+// AuthorizationHandler is an ASP.NET Core naming alias for RequirementHandler.
+type AuthorizationHandler = RequirementHandler
+
+// Handler is a convenient alias for RequirementHandler.
+type Handler = RequirementHandler
+
+// AuthorizationOptions configures the authorization service (mirrors ASP.NET Core AuthorizationOptions).
+type AuthorizationOptions struct {
+	policies       map[string]Policy
+	DefaultPolicy  *Policy
+	FallbackPolicy *Policy
+}
+
+// Options is an alias for AuthorizationOptions.
+type Options = AuthorizationOptions
+
+// NewAuthorizationOptions initializes an AuthorizationOptions builder.
+func NewAuthorizationOptions() *AuthorizationOptions {
+	return &AuthorizationOptions{
+		policies: make(map[string]Policy),
+	}
+}
+
+// NewOptions is an alias for NewAuthorizationOptions.
+func NewOptions() *AuthorizationOptions {
+	return NewAuthorizationOptions()
+}
+
+// AddPolicy registers a policy by name (mirrors options.AddPolicy in ASP.NET Core).
+func (o *AuthorizationOptions) AddPolicy(name string, policy Policy) *AuthorizationOptions {
+	policy.Name = name
+	o.policies[name] = policy
+	return o
+}
+
+// GetPolicy retrieves a registered policy by name.
+func (o *AuthorizationOptions) GetPolicy(name string) (Policy, bool) {
+	p, ok := o.policies[name]
+	return p, ok
+}
+
+// NewAuthorizationService creates a Service using AuthorizationOptions.
+func NewAuthorizationService(opts *AuthorizationOptions, handlers ...RequirementHandler) *AuthorizationService {
+	engine := &PolicyEngine{
+		policies: make(map[string]Policy),
+		handlers: make(map[string]RequirementHandler),
+	}
+	engine.handlers["ScopeRequirement"] = &ScopeRequirementHandler{}
+	engine.handlers["RoleRequirement"] = &RoleRequirementHandler{}
+	engine.handlers["UserPresentRequirement"] = &UserPresentHandler{}
+	engine.handlers["M2MRequirement"] = &M2MHandler{}
+	engine.handlers["CustomRequirement"] = &CustomRequirementHandler{}
+
+	if opts != nil {
+		for _, p := range opts.policies {
+			engine.RegisterPolicy(p)
+		}
+		engine.defaultPolicy = opts.DefaultPolicy
+		engine.fallbackPolicy = opts.FallbackPolicy
+	}
+
+	for _, h := range handlers {
+		if parc, ok := h.(*PARCHandler); ok {
+			engine.handlers["PARCRequirement"] = parc
+		}
+	}
+
+	return engine
+}
+
+// NewService is an alias for NewAuthorizationService.
+func NewService(opts *AuthorizationOptions, handlers ...RequirementHandler) *AuthorizationService {
+	return NewAuthorizationService(opts, handlers...)
 }
 
 // NewPolicyEngine creates a PolicyEngine with default requirement handlers registered.
-func NewPolicyEngine(parcHandler *PARCHandler) *PolicyEngine {
+func NewPolicyEngine(parcHandler ...*PARCHandler) *PolicyEngine {
 	e := &PolicyEngine{
 		policies: make(map[string]Policy),
 		handlers: make(map[string]RequirementHandler),
@@ -226,8 +338,8 @@ func NewPolicyEngine(parcHandler *PARCHandler) *PolicyEngine {
 	e.handlers["M2MRequirement"] = &M2MHandler{}
 	e.handlers["CustomRequirement"] = &CustomRequirementHandler{}
 
-	if parcHandler != nil {
-		e.handlers["PARCRequirement"] = parcHandler
+	if len(parcHandler) > 0 && parcHandler[0] != nil {
+		e.handlers["PARCRequirement"] = parcHandler[0]
 	}
 
 	return e
@@ -241,6 +353,22 @@ func (e *PolicyEngine) RegisterPolicy(policy Policy) {
 // RegisterHandler registers or overrides a handler for a requirement type.
 func (e *PolicyEngine) RegisterHandler(requirementType string, handler RequirementHandler) {
 	e.handlers[requirementType] = handler
+}
+
+// DefaultPolicy returns the configured default policy, if any.
+func (e *PolicyEngine) DefaultPolicy() *Policy {
+	return e.defaultPolicy
+}
+
+// FallbackPolicy returns the configured fallback policy, if any.
+func (e *PolicyEngine) FallbackPolicy() *Policy {
+	return e.fallbackPolicy
+}
+
+// Authorize evaluates a named policy against a Principal (mirrors ASP.NET Core IAuthorizationService.AuthorizeAsync).
+func (e *PolicyEngine) Authorize(ctx context.Context, principal *authn.Principal, policyName string, evalCtx *EvaluationContext) (AuthorizationResult, error) {
+	d, err := e.EvaluatePolicy(ctx, policyName, principal, evalCtx)
+	return d.ToResult(), err
 }
 
 // EvaluatePolicy evaluates a named policy against a Principal.

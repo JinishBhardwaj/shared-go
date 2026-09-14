@@ -17,6 +17,9 @@ type Authenticator interface {
 	Authenticate(c *gin.Context) (*Principal, error)
 }
 
+// AuthenticationHandler is an ASP.NET Core naming alias for Authenticator (IAuthenticationHandler).
+type AuthenticationHandler = Authenticator
+
 // BearerTokenValidator defines the contract for validating Bearer tokens.
 // Satisfied by both JWTValidator and OIDCValidator (coreos/go-oidc/v3).
 type BearerTokenValidator interface {
@@ -35,6 +38,15 @@ type CompositeAuthenticator struct {
 	bearerValidator BearerTokenValidator
 	apiKeyValidator KeyValidator
 }
+
+// SchemeHandler is an ASP.NET Core naming alias for CompositeAuthenticator.
+type SchemeHandler = CompositeAuthenticator
+
+// SchemeHandlerConfig is an ASP.NET Core naming alias for CompositeAuthenticatorConfig.
+type SchemeHandlerConfig = CompositeAuthenticatorConfig
+
+// NewSchemeHandler is an ASP.NET Core naming alias for NewCompositeAuthenticator.
+var NewSchemeHandler = NewCompositeAuthenticator
 
 // CompositeAuthenticatorConfig configures the CompositeAuthenticator.
 type CompositeAuthenticatorConfig struct {

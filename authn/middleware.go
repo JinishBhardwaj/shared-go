@@ -63,6 +63,16 @@ func WithClaimsTransformer(transformer ClaimsTransformer) Option {
 	}
 }
 
+// WithClaimsTransformation is an ASP.NET Core naming alias for WithClaimsTransformer.
+func WithClaimsTransformation(transformation ClaimsTransformation) Option {
+	return WithClaimsTransformer(transformation)
+}
+
+// UseAuthentication creates a Gin authentication middleware (mirrors ASP.NET Core app.UseAuthentication()).
+func UseAuthentication(authenticator Authenticator, opts ...Option) gin.HandlerFunc {
+	return New(authenticator, opts...)
+}
+
 // New creates a Gin middleware that authenticates requests using the provided Authenticator.
 func New(authenticator Authenticator, opts ...Option) gin.HandlerFunc {
 	if authenticator == nil {

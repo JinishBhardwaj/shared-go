@@ -150,9 +150,17 @@ type ClaimsTransformer interface {
 	Transform(ctx context.Context, principal *Principal) (*Principal, error)
 }
 
+// ClaimsTransformation is an ASP.NET Core naming alias for ClaimsTransformer.
+type ClaimsTransformation = ClaimsTransformer
+
 // ClaimsTransformerFunc allows using a standalone function as a ClaimsTransformer.
 type ClaimsTransformerFunc func(ctx context.Context, principal *Principal) (*Principal, error)
 
 func (f ClaimsTransformerFunc) Transform(ctx context.Context, principal *Principal) (*Principal, error) {
 	return f(ctx, principal)
+}
+
+// IsInRole checks if the principal has a specific role (ASP.NET Core ClaimsPrincipal.IsInRole convention).
+func (p *Principal) IsInRole(role string) bool {
+	return p.HasRole(role)
 }
