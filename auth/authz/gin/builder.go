@@ -132,3 +132,19 @@ func (b *AuthorizationBuilder) BuildMiddleware() (gin.HandlerFunc, error) {
 	}
 	return UseAuthorization(service, b.middlewareOptions...), nil
 }
+
+// BuildEngineAndMiddleware builds the AuthorizationService exactly once and
+// returns both it and its configured Gin middleware, so a caller that needs
+// the engine instance for Require(WithEngine(engine), ...) elsewhere gets
+// the SAME instance that is wired into the returned middleware -- calling
+// Build() and BuildMiddleware() separately would construct two independent
+// engines (NewAuthorizationService allocates a new *authz.PolicyEngine on
+// every call), silently wiring a different engine into the router than the
+// one the caller holds a reference to.
+func (b *AuthorizationBuilder) BuildEngineAndMiddleware() (*authz.AuthorizationService, gin.HandlerFunc, error) {
+	service, err := b.Build()
+	if err != nil {
+		return nil, nil, err
+	}
+	return service, UseAuthorization(service, b.middlewareOptions...), nil
+}

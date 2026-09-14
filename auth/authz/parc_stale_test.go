@@ -43,11 +43,20 @@ func (r *countingRepo) GetPermissions(ctx context.Context, principalID string) (
 	if err != nil {
 		return nil, err
 	}
-	cp := *perms
+	// Build a fresh PrincipalPermissions rather than `cp := *perms`: the
+	// struct now carries an unexported sync.Once (Tier 3 rule-index
+	// caching, see parc.go), so a by-value copy of an existing instance
+	// would copy that lock (go vet copylocks) -- constructing a new struct
+	// literal with the same field values avoids that while returning an
+	// equivalent, independent bundle exactly as before.
 	rules := make([]PermissionRule, len(perms.Rules))
 	copy(rules, perms.Rules)
-	cp.Rules = rules
-	return &cp, nil
+	cp := &PrincipalPermissions{
+		PrincipalID: perms.PrincipalID,
+		Rules:       rules,
+		FetchedAt:   perms.FetchedAt,
+	}
+	return cp, nil
 }
 
 func (r *countingRepo) GrantPermission(ctx context.Context, principalID string, rule PermissionRule) error {

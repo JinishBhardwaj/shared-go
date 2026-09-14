@@ -183,6 +183,30 @@ func (b *PolicyBuilder) RequireMethod(methods ...principal.AuthMethod) *PolicyBu
 	return b
 }
 
+// RequireAnyOf asserts that at least one of the given requirements is
+// satisfied (OR). See AnyOfRequirement.
+func (b *PolicyBuilder) RequireAnyOf(reqs ...Requirement) *PolicyBuilder {
+	b.policy.Requirements = append(b.policy.Requirements, AnyOfRequirement{Requirements: reqs})
+	return b
+}
+
+// RequireAllOf asserts that every one of the given requirements is
+// satisfied (AND). See AllOfRequirement -- mainly useful nested inside
+// RequireAnyOf/RequireNot, since Policy's own top-level Requirements are
+// already ANDed.
+func (b *PolicyBuilder) RequireAllOf(reqs ...Requirement) *PolicyBuilder {
+	b.policy.Requirements = append(b.policy.Requirements, AllOfRequirement{Requirements: reqs})
+	return b
+}
+
+// RequireNot asserts that the given requirement is NOT satisfied. See
+// NotRequirement's doc comment for the error-propagation rule that keeps
+// this fail-closed.
+func (b *PolicyBuilder) RequireNot(req Requirement) *PolicyBuilder {
+	b.policy.Requirements = append(b.policy.Requirements, NotRequirement{Requirement: req})
+	return b
+}
+
 // AddRequirement adds an arbitrary requirement to the policy.
 func (b *PolicyBuilder) AddRequirement(req Requirement) *PolicyBuilder {
 	b.policy.Requirements = append(b.policy.Requirements, req)

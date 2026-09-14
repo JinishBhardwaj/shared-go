@@ -680,6 +680,7 @@ func NewAuthorizationService(opts *AuthorizationOptions, handlers ...Requirement
 	engine.handlers["M2MRequirement"] = &M2MHandler{}
 	engine.handlers["MethodRequirement"] = &MethodRequirementHandler{}
 	engine.handlers["CustomRequirement"] = &CustomRequirementHandler{}
+	registerCompositeHandlers(engine)
 
 	if opts != nil {
 		for _, p := range opts.policies {
@@ -723,6 +724,7 @@ func NewPolicyEngine(parcHandler ...*PARCHandler) *PolicyEngine {
 	e.handlers["M2MRequirement"] = &M2MHandler{}
 	e.handlers["MethodRequirement"] = &MethodRequirementHandler{}
 	e.handlers["CustomRequirement"] = &CustomRequirementHandler{}
+	registerCompositeHandlers(e)
 
 	if len(parcHandler) > 0 && parcHandler[0] != nil {
 		e.handlers["PARCRequirement"] = parcHandler[0]
@@ -800,6 +802,66 @@ func (e *PolicyEngine) EvaluatePolicy(ctx context.Context, policyName string, pr
 	return e.Evaluate(ctx, policy, principal, evalCtx)
 }
 
+// evaluateRequirement dispatches a single Requirement to its registered
+// RequirementHandler (falling back to the fixed "CustomRequirement" key for
+// a named CustomRequirement, exactly as before -- see the inline comment
+// below) and returns (allowed, reqType, err). reqType is returned so
+// callers that report a Decision/DecisionEvent (Evaluate below) know which
+// requirement type to attribute a deny to; composite handlers
+// (AllOfRequirement/AnyOfRequirement/NotRequirement, composite.go) ignore
+// it and only consult (allowed, err).
+//
+// Factored out of Evaluate's own loop body (Tier 4 "Composite requirements
+// — AnyOf/AllOf/Not, recursing into the engine") so both Evaluate's
+// top-level AND loop and the composite handlers dispatch through the
+// IDENTICAL lookup/fallback logic -- one implementation, not two that could
+// drift apart. The lock is held only for the map lookup itself and
+// released before Handle is ever called (unchanged from the pre-existing
+// behavior), so a composite handler recursing back into
+// evaluateRequirement from inside Handle never holds e.mu.RLock across
+// that recursive call -- no reentrant-lock hazard.
+func (e *PolicyEngine) evaluateRequirement(ctx context.Context, p *principal.Principal, req Requirement, evalCtx *EvaluationContext) (bool, string, error) {
+	reqType := req.RequirementType()
+	e.mu.RLock()
+	handler, exists := e.handlers[reqType]
+	if !exists {
+		// Tier 1 line 95: a named CustomRequirement's own RequirementType()
+		// returns its Name, not "CustomRequirement", so the lookup above
+		// never finds a handler registered under the requirement's own
+		// name -- before this fallback, that meant every named
+		// CustomRequirement silently denied regardless of what its Func
+		// actually returned. Fall back to whatever handler is registered
+		// under the fixed "CustomRequirement" key (built-in
+		// CustomRequirementHandler by default, or a caller override) for
+		// any Requirement whose concrete type is CustomRequirement, so
+		// the Func is reached and genuinely governs the decision again.
+		if _, isCustom := req.(CustomRequirement); isCustom {
+			handler, exists = e.handlers["CustomRequirement"]
+		}
+	}
+	e.mu.RUnlock()
+	if !exists {
+		return false, reqType, &noHandlerError{reqType: reqType}
+	}
+
+	allowed, err := handler.Handle(ctx, p, req, evalCtx)
+	return allowed, reqType, err
+}
+
+// noHandlerError is returned by evaluateRequirement when no
+// RequirementHandler is registered for a requirement type. A distinct
+// type (rather than a plain fmt.Errorf string) so Evaluate can recognize
+// it via errors.As and preserve its pre-existing observable behavior
+// (report a Decision with a nil error, not a non-nil one) without relying
+// on brittle string-prefix matching.
+type noHandlerError struct {
+	reqType string
+}
+
+func (e *noHandlerError) Error() string {
+	return fmt.Sprintf("no handler registered for requirement type '%s'", e.reqType)
+}
+
 // Evaluate runs all requirements in a Policy against the Principal (AND logic).
 func (e *PolicyEngine) Evaluate(ctx context.Context, policy Policy, principal *principal.Principal, evalCtx *EvaluationContext) (Decision, error) {
 	start := time.Now()
@@ -815,36 +877,22 @@ func (e *PolicyEngine) Evaluate(ctx context.Context, policy Policy, principal *p
 	}
 
 	for _, req := range policy.Requirements {
-		reqType := req.RequirementType()
-		e.mu.RLock()
-		handler, exists := e.handlers[reqType]
-		if !exists {
-			// Tier 1 line 95: a named CustomRequirement's own RequirementType()
-			// returns its Name, not "CustomRequirement", so the lookup above
-			// never finds a handler registered under the requirement's own
-			// name -- before this fallback, that meant every named
-			// CustomRequirement silently denied regardless of what its Func
-			// actually returned. Fall back to whatever handler is registered
-			// under the fixed "CustomRequirement" key (built-in
-			// CustomRequirementHandler by default, or a caller override) for
-			// any Requirement whose concrete type is CustomRequirement, so
-			// the Func is reached and genuinely governs the decision again.
-			if _, isCustom := req.(CustomRequirement); isCustom {
-				handler, exists = e.handlers["CustomRequirement"]
-			}
-		}
-		e.mu.RUnlock()
-		if !exists {
-			d := Decision{
-				Allowed: false,
-				Reason:  fmt.Sprintf("no handler registered for requirement type '%s'", reqType),
-			}
-			e.emitDecision(ctx, policy.Name, d, reqType, start)
-			return d, nil
-		}
-
-		allowed, err := handler.Handle(ctx, principal, req, evalCtx)
+		allowed, reqType, err := e.evaluateRequirement(ctx, principal, req, evalCtx)
 		if err != nil {
+			// evaluateRequirement returns a "no handler registered" error
+			// as a plain error too (previously Evaluate's own inline loop
+			// built that Decision directly without treating it as an
+			// error return); preserve the original observable behavior
+			// here: "no handler registered" reports a Decision but a nil
+			// error, exactly as before, while every other error (a real
+			// handler failure) reports both a Decision and a non-nil
+			// error, also exactly as before.
+			var noHandler *noHandlerError
+			if errors.As(err, &noHandler) {
+				d := Decision{Allowed: false, Reason: err.Error()}
+				e.emitDecision(ctx, policy.Name, d, reqType, start)
+				return d, nil
+			}
 			d := Decision{Allowed: false, Reason: err.Error()}
 			e.emitDecision(ctx, policy.Name, d, reqType, start)
 			return d, err
