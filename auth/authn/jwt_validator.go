@@ -246,10 +246,12 @@ func determineOAuthFlow(claims jwt.MapClaims, clientID, sub string) principal.Au
 		return principal.AuthMethodDeviceFlow
 	}
 
-	// If an end-user subject exists and no M2M markers were detected, default to AuthCode+PKCE
-	if sub != "" {
-		return principal.AuthMethodAuthCodePKCE
-	}
-
+	// Tier 0 #3: do NOT default to AuthMethodAuthCodePKCE just because a
+	// subject is present. Many client-credentials tokens (especially from
+	// IdPs that omit gty/amr) still carry a sub claim, and inferring "user
+	// present" from sub alone let client-credentials tokens satisfy
+	// RequireUser()/UserPresentRequirement. "User present" must be a
+	// positive signal (an explicit grant_type/gty, amr, or a per-issuer
+	// opt-in), never an inference from the absence of M2M markers.
 	return principal.AuthMethodUnknown
 }

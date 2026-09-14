@@ -195,3 +195,57 @@ func TestJWTValidator_ValidationErrors(t *testing.T) {
 		}
 	})
 }
+
+// TestDetermineOAuthFlow_NoInferenceFromSubAlone is the Tier 0 #3 regression
+// test (gap-analysis-final.md: "determineOAuthFlow defaults to
+// AuthMethodAuthCodePKCE whenever sub != ”, so client-credentials tokens
+// from IdPs that omit gty/amr are classified as interactive users and
+// satisfy RequireUser()/UserPresentRequirement"). A token that carries a
+// subject but none of the recognized flow signals (gty, grant_type, amr,
+// client_id/sub M2M heuristics, device_code) must classify as
+// AuthMethodUnknown, not AuthCodePKCE -- "user present" must never be
+// inferred from sub alone.
+func TestDetermineOAuthFlow_NoInferenceFromSubAlone(t *testing.T) {
+	privKey, pubKey := generateTestRSAKey(t)
+	issuer := "https://auth.example.com"
+	audience := "https://api.example.com"
+
+	validator, err := NewJWTValidator(JWTValidatorConfig{
+		KeyFunc: func(token *jwt.Token) (any, error) {
+			return pubKey, nil
+		},
+		ExpectedIssuer:     issuer,
+		ExpectedAudience:   audience,
+		ClockSkewTolerance: 10 * time.Second,
+	})
+	if err != nil {
+		t.Fatalf("unexpected error creating validator: %v", err)
+	}
+
+	// A client-credentials-style token from an IdP that does not populate
+	// gty/grant_type/amr/device_code, and whose sub does not match any of
+	// the client_id/service-account/client- M2M heuristics -- exactly the
+	// case the gap analysis describes as silently passing as an
+	// interactive user today.
+	claims := jwt.MapClaims{
+		"iss": issuer,
+		"aud": audience,
+		"sub": "m2m-principal-without-flow-markers",
+		"exp": time.Now().Add(time.Hour).Unix(),
+		"iat": time.Now().Unix(),
+	}
+	rawToken := signTestJWT(t, privKey, claims)
+
+	id, err := validator.ValidateToken(context.Background(), rawToken)
+	if err != nil {
+		t.Fatalf("ValidateToken failed: %v", err)
+	}
+
+	if id.Method != principal.AuthMethodUnknown {
+		t.Errorf("expected AuthMethodUnknown when no flow signal is present, got %s", id.Method)
+	}
+	if id.IsUserPresent() {
+		t.Errorf("expected IsUserPresent() == false for a token with no flow signal, got true -- " +
+			"this would let RequireUser()/UserPresentRequirement pass for an unclassified token")
+	}
+}

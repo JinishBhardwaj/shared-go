@@ -42,7 +42,11 @@ func RequireScope(requiredScopes ...string) gin.HandlerFunc {
 		req := authz.ScopeRequirement{Scopes: requiredScopes, RequireAll: true}
 		allowed, _ := scopeHandler.Handle(c.Request.Context(), user, req, nil)
 		if !allowed {
-			c.Header("WWW-Authenticate", fmt.Sprintf(`Bearer error="insufficient_scope", scope="%s"`, strings.Join(requiredScopes, " ")))
+			// requiredScopes is route-wiring config, not attacker input --
+			// but per Tier 0 #7 every auth-param value written into this
+			// header goes through the same RFC 7235 quoting regardless.
+			c.Header("WWW-Authenticate", fmt.Sprintf("Bearer error=%s, scope=%s",
+				quoteRFC7235(rfc6750InsufficientScope), quoteRFC7235(strings.Join(requiredScopes, " "))))
 			c.AbortWithStatusJSON(http.StatusForbidden, gin.H{
 				"error":             "insufficient_scope",
 				"error_description": fmt.Sprintf("Requires all of the following scopes: %s", strings.Join(requiredScopes, ", ")),
@@ -68,7 +72,8 @@ func RequireAnyScope(candidateScopes ...string) gin.HandlerFunc {
 		req := authz.ScopeRequirement{Scopes: candidateScopes, RequireAll: false}
 		allowed, _ := scopeHandler.Handle(c.Request.Context(), user, req, nil)
 		if !allowed {
-			c.Header("WWW-Authenticate", fmt.Sprintf(`Bearer error="insufficient_scope", scope="%s"`, strings.Join(candidateScopes, " ")))
+			c.Header("WWW-Authenticate", fmt.Sprintf("Bearer error=%s, scope=%s",
+				quoteRFC7235(rfc6750InsufficientScope), quoteRFC7235(strings.Join(candidateScopes, " "))))
 			c.AbortWithStatusJSON(http.StatusForbidden, gin.H{
 				"error":             "insufficient_scope",
 				"error_description": fmt.Sprintf("Requires at least one of the following scopes: %s", strings.Join(candidateScopes, ", ")),

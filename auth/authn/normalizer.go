@@ -1,12 +1,21 @@
 package authn
 
 import (
+	"errors"
 	"strings"
 	"time"
 
 	"github.com/JinishBhardwaj/shared-go/auth/principal"
 	"github.com/golang-jwt/jwt/v5"
 )
+
+// ErrIDTokenRejected is returned when a Cognito token's token_use claim
+// identifies it as an ID token (or anything other than "access") but it was
+// presented where an access token is required. Tier 0 #5: token_use was
+// previously read only to resolve ClientID and never enforced, so a
+// Cognito ID token would normalize successfully and be accepted as if it
+// were a valid access token.
+var ErrIDTokenRejected = errors.New("authn: token_use is not \"access\" -- ID tokens are not accepted for API authorization")
 
 // ClaimsNormalizer defines the strategy for mapping IdP-specific JWT claims into a normalized Principal.
 // Conforms to the Strategy Pattern and Open/Closed Principle.
@@ -85,6 +94,18 @@ func (c *CognitoClaimsNormalizer) Normalize(claims jwt.MapClaims, rawToken strin
 	p, err := c.standard.Normalize(claims, rawToken)
 	if err != nil {
 		return nil, err
+	}
+
+	// 0. Enforce token_use (Tier 0 #5). Cognito stamps every token with
+	// token_use: "access" or token_use: "id". This normalizer backs
+	// API-facing authentication, so an ID token must be rejected outright
+	// rather than silently normalized and accepted as an access token. A
+	// token with no token_use claim at all is not a Cognito-shaped token in
+	// the first place and passes through unchanged (StandardOIDCNormalizer
+	// has no token_use concept, and this normalizer's job is limited to the
+	// claims Cognito actually defines).
+	if tokenUse, ok := claims["token_use"].(string); ok && tokenUse != "access" {
+		return nil, ErrIDTokenRejected
 	}
 
 	// 1. Map Cognito Groups to Roles (e.g. ["Admins", "Managers"])

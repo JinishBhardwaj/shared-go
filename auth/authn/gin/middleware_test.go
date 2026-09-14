@@ -3,8 +3,10 @@ package gin
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
@@ -242,6 +244,91 @@ func TestMiddleware_APIKeyFlow(t *testing.T) {
 	})
 }
 
+// leakyValidator is a BearerTokenValidator stub that always fails with an
+// error carrying content that must never reach a caller: a fake secret, an
+// embedded double-quote, and a CRLF sequence attempting header injection.
+type leakyValidator struct{}
+
+func (leakyValidator) ValidateToken(ctx context.Context, tokenStr string) (*principal.Principal, error) {
+	return nil, errors.New("pq: password authentication failed for user \"admin\" secret=hunter2\r\nX-Injected: evil")
+}
+
+// TestHandleAuthError_NeverLeaksRawInternalErrorText is the Tier 0 #7
+// regression test (gap-analysis-final.md: "internal error text
+// interpolated into the WWW-Authenticate header and body ... leaks DB/IdP
+// messages; quotes or CRLF in an error break the quoted-string -> header
+// injection"). A validator's raw Error() text -- however sensitive or
+// malformed -- must never appear verbatim in the WWW-Authenticate header
+// or the JSON error body, and the header must never contain an embedded
+// CRLF (which would inject additional header fields).
+func TestHandleAuthError_NeverLeaksRawInternalErrorText(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	composite := NewCompositeAuthenticator(CompositeAuthenticatorConfig{
+		BearerValidator: leakyValidator{},
+	})
+
+	r := gin.New()
+	r.Use(New(composite))
+	r.GET("/me", func(c *gin.Context) {
+		c.String(http.StatusOK, "should never reach here")
+	})
+
+	req, _ := http.NewRequest(http.MethodGet, "/me", nil)
+	req.Header.Set("Authorization", "Bearer whatever")
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+
+	if w.Code != http.StatusUnauthorized {
+		t.Fatalf("expected 401, got %d", w.Code)
+	}
+
+	hdr := w.Header().Get("WWW-Authenticate")
+	body := w.Body.String()
+
+	for _, leaked := range []string{"hunter2", "password authentication failed", "admin", "X-Injected"} {
+		if strings.Contains(hdr, leaked) {
+			t.Errorf("WWW-Authenticate header leaked internal error text %q: %s", leaked, hdr)
+		}
+		if strings.Contains(body, leaked) {
+			t.Errorf("response body leaked internal error text %q: %s", leaked, body)
+		}
+	}
+
+	if strings.Contains(hdr, "\r") || strings.Contains(hdr, "\n") {
+		t.Errorf("WWW-Authenticate header contains an embedded CR/LF (header injection): %q", hdr)
+	}
+
+	if !strings.Contains(hdr, `error="invalid_token"`) {
+		t.Errorf("expected a fixed error=\"invalid_token\" in the header, got: %s", hdr)
+	}
+}
+
+// TestHandleAuthError_KnownErrorMapsToFixedCode confirms a recognized
+// sentinel error still maps to its documented, fixed RFC 6750 code and
+// description (unaffected by the Tier 0 #7 fix to the default/unclassified
+// branch).
+func TestHandleAuthError_KnownErrorMapsToFixedCode(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	r := gin.New()
+	r.GET("/me", func(c *gin.Context) {
+		handleAuthError(c, authn.ErrTokenExpired, MiddlewareConfig{realm: DefaultRealm})
+	})
+
+	req, _ := http.NewRequest(http.MethodGet, "/me", nil)
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+
+	hdr := w.Header().Get("WWW-Authenticate")
+	if !strings.Contains(hdr, `error="invalid_token"`) {
+		t.Errorf("expected error=\"invalid_token\" for ErrTokenExpired, got: %s", hdr)
+	}
+	if !strings.Contains(hdr, `error_description="The credential has expired"`) {
+		t.Errorf("expected the fixed expiry description, got: %s", hdr)
+	}
+}
+
 func TestMiddleware_ClaimsTransformer(t *testing.T) {
 	keyStore := authn.NewMemoryAPIKeyStore()
 	sampleKey, _, err := keyStore.CreateKey("owner-1", "client-1", "TestKey", []string{"read"}, []string{"user"}, 1*time.Hour)
@@ -285,4 +372,3 @@ func TestMiddleware_ClaimsTransformer(t *testing.T) {
 		t.Fatalf("expected 200 OK, got %d: %s", w.Code, w.Body.String())
 	}
 }
-

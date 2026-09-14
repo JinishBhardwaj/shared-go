@@ -32,10 +32,11 @@ func RequirePolicy(engine *authz.PolicyEngine, policyName string, getResource ..
 	return func(c *gin.Context) {
 		user := ginprincipal.User(c) // Mirrors HttpContext.User
 		if user == nil {
-			c.Header("WWW-Authenticate", `Bearer error="unauthorized", error_description="Authentication required"`)
+			c.Header("WWW-Authenticate", fmt.Sprintf("Bearer error=%s, error_description=%s",
+				quoteRFC7235(rfc6750Unauthorized), quoteRFC7235(descAuthenticationRequired)))
 			c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{
-				"error":             "unauthorized",
-				"error_description": "Authentication required",
+				"error":             rfc6750Unauthorized,
+				"error_description": descAuthenticationRequired,
 			})
 			return
 		}
@@ -57,17 +58,19 @@ func RequirePolicy(engine *authz.PolicyEngine, policyName string, getResource ..
 			},
 		}
 
+		// Tier 0 #7: decision.Reason is deliberately NOT echoed to the
+		// caller -- it can be built from an arbitrary wrapped internal
+		// error (see httpsec.go / authz/engine.go's Evaluate). Log it
+		// server-side and answer with a fixed, generic description.
 		decision, err := engine.EvaluatePolicy(c.Request.Context(), policyName, user, evalCtx)
 		if err != nil || !decision.Allowed {
-			reason := decision.Reason
-			if reason == "" {
-				reason = "Access denied by policy"
-			}
+			logAuthzDenial(fmt.Sprintf("policy %q", policyName), decision.Reason)
 
-			c.Header("WWW-Authenticate", fmt.Sprintf(`Bearer error="insufficient_scope", error_description="%s"`, reason))
+			c.Header("WWW-Authenticate", fmt.Sprintf("Bearer error=%s, error_description=%s",
+				quoteRFC7235(rfc6750InsufficientScope), quoteRFC7235(descAccessDeniedByPolicy)))
 			c.AbortWithStatusJSON(http.StatusForbidden, gin.H{
 				"error":             "forbidden",
-				"error_description": reason,
+				"error_description": descAccessDeniedByPolicy,
 				"policy":            policyName,
 			})
 			return
@@ -90,10 +93,11 @@ func RequirePARC(engine *authz.PolicyEngine, action, resourceType string, getRes
 	return func(c *gin.Context) {
 		user := ginprincipal.User(c) // Mirrors HttpContext.User
 		if user == nil {
-			c.Header("WWW-Authenticate", `Bearer error="unauthorized", error_description="Authentication required"`)
+			c.Header("WWW-Authenticate", fmt.Sprintf("Bearer error=%s, error_description=%s",
+				quoteRFC7235(rfc6750Unauthorized), quoteRFC7235(descAuthenticationRequired)))
 			c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{
-				"error":             "unauthorized",
-				"error_description": "Authentication required",
+				"error":             rfc6750Unauthorized,
+				"error_description": descAuthenticationRequired,
 			})
 			return
 		}
@@ -117,17 +121,20 @@ func RequirePARC(engine *authz.PolicyEngine, action, resourceType string, getRes
 			},
 		}
 
+		// Tier 0 #7: decision.Reason is deliberately NOT echoed to the
+		// caller (same reasoning as RequirePolicy above). The
+		// action/resourceType-based description below is always safe --
+		// both are route-wiring constants, never derived from an error.
 		decision, err := engine.Evaluate(c.Request.Context(), inlinePolicy, user, evalCtx)
 		if err != nil || !decision.Allowed {
-			reason := decision.Reason
-			if reason == "" {
-				reason = fmt.Sprintf("Missing permission for action '%s' on resource '%s'", action, resourceType)
-			}
+			logAuthzDenial(fmt.Sprintf("PARC action=%q resource_type=%q", action, resourceType), decision.Reason)
 
-			c.Header("WWW-Authenticate", fmt.Sprintf(`Bearer error="insufficient_scope", error_description="%s"`, reason))
+			safeDesc := fmt.Sprintf("Missing permission for action '%s' on resource '%s'", action, resourceType)
+			c.Header("WWW-Authenticate", fmt.Sprintf("Bearer error=%s, error_description=%s",
+				quoteRFC7235(rfc6750InsufficientScope), quoteRFC7235(safeDesc)))
 			c.AbortWithStatusJSON(http.StatusForbidden, gin.H{
 				"error":             "insufficient_permissions",
-				"error_description": reason,
+				"error_description": safeDesc,
 				"action":            action,
 				"resource_type":     resourceType,
 			})

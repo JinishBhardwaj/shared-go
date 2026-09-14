@@ -15,7 +15,28 @@ type CognitoOptions struct {
 	UserPoolID      string
 	IssuerURL       string
 	CustomKeySetURL string
-	ClientID        string
+
+	// ClientID is the single expected app-client audience. Set this when
+	// the API is consumed by exactly one Cognito app client.
+	ClientID string
+
+	// AllowedAudiences lists acceptable app-client audiences when more
+	// than one Cognito app client must be accepted. Ignored if ClientID
+	// is set.
+	//
+	// Tier 0 #4: WithCognito used to hardcode SkipClientIDCheck: true
+	// unconditionally, disabling audience/client-ID validation for every
+	// Cognito consumer regardless of configuration (RFC 9068 §4 / RFC 7519
+	// §4.1.3 confused-deputy exposure). Set ClientID or AllowedAudiences to
+	// get real enforcement.
+	AllowedAudiences []string
+
+	// SkipClientIDCheck explicitly disables audience/client-ID enforcement.
+	// This must be set true on purpose -- it is never silently implied by
+	// leaving ClientID and AllowedAudiences empty (that path still works,
+	// per the underlying OIDC validator's requirements, but logs a loud
+	// server-side warning instead of skipping silently).
+	SkipClientIDCheck bool
 }
 
 // AuthenticationBuilder provides a fluent builder for authn configuration,
@@ -48,7 +69,8 @@ func (b *AuthenticationBuilder) WithCognito(ctx context.Context, opts CognitoOpt
 	validator, err := authn.NewOIDCValidator(ctx, authn.OIDCValidatorConfig{
 		IssuerURL:            issuerURL,
 		ExpectedClientID:     opts.ClientID,
-		SkipClientIDCheck:    true, // Dynamic multi-client validation
+		AllowedAudiences:     opts.AllowedAudiences,
+		SkipClientIDCheck:    opts.SkipClientIDCheck,
 		SupportedSigningAlgs: []string{"RS256"},
 		Normalizer:           authn.NewCognitoClaimsNormalizer(),
 		CustomKeySetURL:      opts.CustomKeySetURL,

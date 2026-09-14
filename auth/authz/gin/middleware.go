@@ -115,11 +115,13 @@ func New(service *authz.PolicyEngine, opts ...MiddlewareOption) gin.HandlerFunc 
 				decision, err := service.Evaluate(c.Request.Context(), *cfg.fallbackPolicy, user, evalCtx)
 				result := decision.ToResult()
 				if err != nil || !result.Succeeded {
-					reason := result.FailureReason
-					if reason == "" {
-						reason = "Access denied by fallback policy"
-					}
-					handleResult(c, authz.FailedResult(reason), cfg.fallbackPolicy.Name, cfg.resultHandler)
+					// The full, unsanitized result (whose FailureReason may
+					// carry a wrapped internal error -- see httpsec.go) is
+					// still passed through to a caller-supplied
+					// cfg.resultHandler, exactly as before; only the
+					// built-in default writer inside handleResult stops
+					// echoing it (Tier 0 #7).
+					handleResult(c, result, cfg.fallbackPolicy.Name, cfg.resultHandler)
 					c.Abort()
 					return
 				}
@@ -194,11 +196,7 @@ func Authorize(policyName string, args ...any) gin.HandlerFunc {
 
 		result, err := srv.Authorize(c.Request.Context(), user, policyName, evalCtx)
 		if err != nil || !result.Succeeded {
-			reason := result.FailureReason
-			if reason == "" {
-				reason = "Access denied by policy"
-			}
-			handleResult(c, authz.FailedResult(reason), policyName, nil)
+			handleResult(c, result, policyName, nil)
 			c.Abort()
 			return
 		}
@@ -247,7 +245,9 @@ func AuthorizeResource(c *gin.Context, resource authz.Resource, policyName strin
 	return result
 }
 
-// handleResult writes the appropriate 401 or 403 HTTP response.
+// handleResult writes the appropriate 401 or 403 HTTP response. Tier 0 #7:
+// result.FailureReason is deliberately NOT echoed here -- see httpsec.go.
+// The real reason is logged server-side only.
 func handleResult(c *gin.Context, result authz.AuthorizationResult, policyName string, customHandler ResultHandler) {
 	if customHandler != nil {
 		customHandler(c, result, policyName)
@@ -255,20 +255,24 @@ func handleResult(c *gin.Context, result authz.AuthorizationResult, policyName s
 	}
 
 	status := http.StatusForbidden
-	if !result.Succeeded && result.FailureReason == "Authentication required" {
+	if !result.Succeeded && result.FailureReason == descAuthenticationRequired {
+		logAuthzDenial("request", result.FailureReason)
 		status = http.StatusUnauthorized
-		c.Header("WWW-Authenticate", `Bearer error="unauthorized", error_description="Authentication required"`)
+		c.Header("WWW-Authenticate", fmt.Sprintf("Bearer error=%s, error_description=%s",
+			quoteRFC7235(rfc6750Unauthorized), quoteRFC7235(descAuthenticationRequired)))
 		c.JSON(status, gin.H{
-			"error":             "unauthorized",
-			"error_description": "Authentication required",
+			"error":             rfc6750Unauthorized,
+			"error_description": descAuthenticationRequired,
 		})
 		return
 	}
 
-	c.Header("WWW-Authenticate", fmt.Sprintf(`Bearer error="insufficient_scope", error_description="%s"`, result.FailureReason))
+	logAuthzDenial(fmt.Sprintf("policy %q", policyName), result.FailureReason)
+	c.Header("WWW-Authenticate", fmt.Sprintf("Bearer error=%s, error_description=%s",
+		quoteRFC7235(rfc6750InsufficientScope), quoteRFC7235(descAccessDeniedByPolicy)))
 	c.JSON(status, gin.H{
 		"error":             "forbidden",
-		"error_description": result.FailureReason,
+		"error_description": descAccessDeniedByPolicy,
 		"policy":            policyName,
 	})
 }

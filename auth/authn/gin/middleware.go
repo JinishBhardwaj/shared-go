@@ -3,7 +3,9 @@ package gin
 import (
 	"errors"
 	"fmt"
+	"log"
 	"net/http"
+	"strings"
 
 	"github.com/JinishBhardwaj/shared-go/auth/authn"
 	"github.com/JinishBhardwaj/shared-go/auth/principal"
@@ -111,6 +113,28 @@ func New(authenticator Authenticator, opts ...Option) gin.HandlerFunc {
 	}
 }
 
+// RFC 6750 (Bearer Token Usage §3.1) defines a closed error-code vocabulary
+// for the WWW-Authenticate challenge: invalid_request, invalid_token,
+// insufficient_scope. "unauthorized" is not part of that registry but is
+// this package's own long-standing, fixed, non-leaking convention for "no
+// credentials were presented at all" (kept here for response-shape
+// compatibility -- it carries no dynamic content, so it's as safe as the
+// three RFC-defined codes).
+//
+// Tier 0 #7: every errCode/errDesc assigned in handleAuthError below MUST be
+// one of a small set of fixed literals -- never the text of an arbitrary
+// error. Internal validator errors (a wrapped go-oidc/JWKS failure, a
+// custom BearerTokenValidator's own error, a DB message from a
+// custom APIKeyStore, etc.) can contain IdP/DB internals and, unescaped,
+// can also break the header's quoted-string and inject additional header
+// fields or response content. Real detail is logged server-side only
+// (logAuthFailure) and never echoed to the caller.
+const (
+	rfc6750Unauthorized   = "unauthorized"
+	rfc6750InvalidRequest = "invalid_request"
+	rfc6750InvalidToken   = "invalid_token"
+)
+
 // handleAuthError emits RFC 6750 compliant headers and JSON response.
 func handleAuthError(c *gin.Context, err error, cfg MiddlewareConfig) {
 	status := http.StatusUnauthorized
@@ -118,26 +142,34 @@ func handleAuthError(c *gin.Context, err error, cfg MiddlewareConfig) {
 
 	switch {
 	case errors.Is(err, ErrNoCredentialsFound):
-		errCode = "unauthorized"
+		errCode = rfc6750Unauthorized
 		errDesc = "No credentials provided"
 	case errors.Is(err, authn.ErrTokenExpired), errors.Is(err, authn.ErrAPIKeyExpired):
-		errCode = "invalid_token"
+		errCode = rfc6750InvalidToken
 		errDesc = "The credential has expired"
 	case errors.Is(err, authn.ErrAPIKeyRevoked):
-		errCode = "invalid_token"
+		errCode = rfc6750InvalidToken
 		errDesc = "The API key has been revoked"
 	case errors.Is(err, ErrMultipleCredTypes):
-		errCode = "invalid_request"
+		errCode = rfc6750InvalidRequest
 		errDesc = "Multiple conflicting authentication methods supplied"
 	case errors.Is(err, ErrInvalidHeader):
-		errCode = "invalid_request"
+		errCode = rfc6750InvalidRequest
 		errDesc = "Malformed authorization header"
 	default:
-		errCode = "invalid_token"
-		errDesc = err.Error()
+		// Signature failures, JWKS/OIDC discovery errors, a custom
+		// BearerTokenValidator/APIKeyStore's own errors, and anything else
+		// not explicitly classified above land here. Their Error() text is
+		// never safe to return to the caller (Tier 0 #7) -- log it
+		// server-side and answer with a fixed, generic description only.
+		errCode = rfc6750InvalidToken
+		errDesc = "The provided credential could not be validated"
 	}
 
-	authHeaderVal := fmt.Sprintf(`Bearer realm="%s", error="%s", error_description="%s"`, cfg.realm, errCode, errDesc)
+	logAuthFailure(err)
+
+	authHeaderVal := fmt.Sprintf("Bearer realm=%s, error=%s, error_description=%s",
+		quoteRFC7235(cfg.realm), quoteRFC7235(errCode), quoteRFC7235(errDesc))
 	c.Header("WWW-Authenticate", authHeaderVal)
 
 	if cfg.errorHandler != nil {
@@ -149,4 +181,36 @@ func handleAuthError(c *gin.Context, err error, cfg MiddlewareConfig) {
 		"error":             errCode,
 		"error_description": errDesc,
 	})
+}
+
+// logAuthFailure records the real, unsanitized authentication error
+// server-side only (Tier 0 #7's "log the real detail server-side only"
+// requirement). Never called anywhere near a header or response body.
+func logAuthFailure(err error) {
+	log.Printf("authn: rejecting request: %v", err)
+}
+
+// quoteRFC7235 renders s as an RFC 7235 quoted-string for use as an
+// auth-param value: wrapped in double quotes, with '"' and '\' backslash-
+// escaped, and CR/LF/other control characters dropped outright (escaping
+// them would still deliver them into the header value; RFC 7230 forbids
+// them in a header field entirely). This is what stops a value containing
+// a stray quote or embedded newline from truncating the auth-param early or
+// injecting additional header fields / response content (Tier 0 #7).
+func quoteRFC7235(s string) string {
+	var b strings.Builder
+	b.WriteByte('"')
+	for _, r := range s {
+		switch {
+		case r == '"' || r == '\\':
+			b.WriteByte('\\')
+			b.WriteRune(r)
+		case r == '\r' || r == '\n' || r < 0x20 || r == 0x7f:
+			continue
+		default:
+			b.WriteRune(r)
+		}
+	}
+	b.WriteByte('"')
+	return b.String()
 }

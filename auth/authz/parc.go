@@ -86,9 +86,13 @@ func (r *PermissionRule) Matches(req Request) bool {
 		return false
 	}
 
-	// 4. Check Tenant ID if specified
-	if r.TenantID != "" && r.TenantID != "*" && req.Resource.TenantID != "" {
-		if r.TenantID != req.Resource.TenantID {
+	// 4. Check Tenant ID if the rule pins one. Tier 0 #1: an empty rule
+	// TenantID (or the literal "*") means "any tenant", but once a rule DOES
+	// pin a tenant, a request whose Resource.TenantID is empty must be
+	// treated as "tenant unknown/omitted" -- never as "any tenant is fine".
+	// Fail closed: only an exact tenant match satisfies a pinned rule.
+	if r.TenantID != "" && r.TenantID != "*" {
+		if req.Resource.TenantID != r.TenantID {
 			return false
 		}
 	}
@@ -135,8 +139,15 @@ func (p *PrincipalPermissions) Evaluate(req Request) Decision {
 }
 
 // matchGlob performs wildcard pattern matching supporting '*' syntax.
+// Tier 0 #2: only the literal "*" means wildcard. An empty pattern (e.g. a
+// blank ActionPattern/ResourceIDPattern from a corrupted or zero-valued DB
+// row) must never match anything -- treating "" as "*" silently turns a
+// missing rule field into a universal grant.
 func matchGlob(pattern, val string) bool {
-	if pattern == "*" || pattern == "" {
+	if pattern == "" {
+		return false
+	}
+	if pattern == "*" {
 		return true
 	}
 	if pattern == val {
