@@ -66,22 +66,11 @@ func setupTestRouter(t *testing.T) (*gin.Engine, *authtest.MockOAuthProvider, *a
 				"scopes":    id.Scopes,
 			})
 		})
-
-		api.GET("/user-only", authn.RequireUser(), func(c *gin.Context) {
-			c.JSON(http.StatusOK, gin.H{"access": "granted"})
-		})
-
-		api.GET("/m2m-only", authn.RequireM2M(), func(c *gin.Context) {
-			c.JSON(http.StatusOK, gin.H{"access": "granted"})
-		})
-
-		api.GET("/reports", authn.RequireScope("read:reports"), func(c *gin.Context) {
-			c.JSON(http.StatusOK, gin.H{"reports": []string{"rep1"}})
-		})
-
-		api.GET("/admin", authn.RequireRole("admin"), func(c *gin.Context) {
-			c.JSON(http.StatusOK, gin.H{"admin": true})
-		})
+		// Scope/role/method route guards (RequireUser, RequireM2M, RequireScope,
+		// RequireRole, ...) moved to auth/authz/gin (gap-analysis-final.md §3.8
+		// step 6); their behavior is exercised there, not here. This package's
+		// own concern -- that authentication correctly derives Subject/Method/
+		// Scopes per OAuth flow -- is covered by the /me assertions below.
 	}
 
 	return r, provider, keyStore, sampleAPIKey
@@ -152,24 +141,6 @@ func TestMiddleware_OAuthFlows(t *testing.T) {
 		if resp["subject"] != "user-pkce-456" {
 			t.Errorf("expected subject user-pkce-456, got %v", resp["subject"])
 		}
-
-		// Verify RequireUser succeeds
-		reqUser, _ := http.NewRequest(http.MethodGet, "/api/user-only", nil)
-		reqUser.Header.Set("Authorization", "Bearer "+token)
-		wUser := httptest.NewRecorder()
-		r.ServeHTTP(wUser, reqUser)
-		if wUser.Code != http.StatusOK {
-			t.Errorf("expected 200 for user-only with PKCE token, got %d", wUser.Code)
-		}
-
-		// Verify RequireM2M is blocked
-		reqM2M, _ := http.NewRequest(http.MethodGet, "/api/m2m-only", nil)
-		reqM2M.Header.Set("Authorization", "Bearer "+token)
-		wM2M := httptest.NewRecorder()
-		r.ServeHTTP(wM2M, reqM2M)
-		if wM2M.Code != http.StatusForbidden {
-			t.Errorf("expected 403 Forbidden for m2m-only with PKCE token, got %d", wM2M.Code)
-		}
 	})
 
 	// 2. Test Client Credentials Flow
@@ -193,24 +164,6 @@ func TestMiddleware_OAuthFlows(t *testing.T) {
 		_ = json.Unmarshal(w.Body.Bytes(), &resp)
 		if resp["method"] != string(principal.AuthMethodClientCredentials) {
 			t.Errorf("expected method %s, got %v", principal.AuthMethodClientCredentials, resp["method"])
-		}
-
-		// Verify RequireM2M succeeds
-		reqM2M, _ := http.NewRequest(http.MethodGet, "/api/m2m-only", nil)
-		reqM2M.Header.Set("Authorization", "Bearer "+token)
-		wM2M := httptest.NewRecorder()
-		r.ServeHTTP(wM2M, reqM2M)
-		if wM2M.Code != http.StatusOK {
-			t.Errorf("expected 200 for m2m-only with client credentials token, got %d", wM2M.Code)
-		}
-
-		// Verify RequireUser is blocked
-		reqUser, _ := http.NewRequest(http.MethodGet, "/api/user-only", nil)
-		reqUser.Header.Set("Authorization", "Bearer "+token)
-		wUser := httptest.NewRecorder()
-		r.ServeHTTP(wUser, reqUser)
-		if wUser.Code != http.StatusForbidden {
-			t.Errorf("expected 403 Forbidden for user-only with client credentials token, got %d", wUser.Code)
 		}
 	})
 
@@ -252,15 +205,6 @@ func TestMiddleware_OAuthFlows(t *testing.T) {
 		if resp["method"] != string(principal.AuthMethodDeviceFlow) {
 			t.Errorf("expected method %s, got %v", principal.AuthMethodDeviceFlow, resp["method"])
 		}
-
-		// RequireUser should succeed because device flow represents an end user
-		reqUser, _ := http.NewRequest(http.MethodGet, "/api/user-only", nil)
-		reqUser.Header.Set("Authorization", "Bearer "+token)
-		wUser := httptest.NewRecorder()
-		r.ServeHTTP(wUser, reqUser)
-		if wUser.Code != http.StatusOK {
-			t.Errorf("expected 200 for user-only with device flow token, got %d", wUser.Code)
-		}
 	})
 }
 
@@ -282,24 +226,6 @@ func TestMiddleware_APIKeyFlow(t *testing.T) {
 		_ = json.Unmarshal(w.Body.Bytes(), &resp)
 		if resp["method"] != string(principal.AuthMethodAPIKey) {
 			t.Errorf("expected method %s, got %v", principal.AuthMethodAPIKey, resp["method"])
-		}
-
-		// RequireScope test
-		reqRep, _ := http.NewRequest(http.MethodGet, "/api/reports", nil)
-		reqRep.Header.Set("X-API-Key", sampleKey)
-		wRep := httptest.NewRecorder()
-		r.ServeHTTP(wRep, reqRep)
-		if wRep.Code != http.StatusOK {
-			t.Errorf("expected 200 OK for /api/reports, got %d", wRep.Code)
-		}
-
-		// RequireRole test
-		reqAdmin, _ := http.NewRequest(http.MethodGet, "/api/admin", nil)
-		reqAdmin.Header.Set("X-API-Key", sampleKey)
-		wAdmin := httptest.NewRecorder()
-		r.ServeHTTP(wAdmin, reqAdmin)
-		if wAdmin.Code != http.StatusOK {
-			t.Errorf("expected 200 OK for /api/admin, got %d", wAdmin.Code)
 		}
 	})
 

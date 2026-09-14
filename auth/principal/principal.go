@@ -90,12 +90,14 @@ func (p *Principal) HasAllScopes(requiredScopes ...string) bool {
 }
 
 // HasAnyScope returns true if the principal has at least one of the scopes in candidateScopes.
+// An empty candidateScopes list fails closed (returns false): "no acceptable scope was
+// specified" must never be read as "any scope is acceptable" (Tier 0 #6).
 func (p *Principal) HasAnyScope(candidateScopes ...string) bool {
 	if p == nil {
 		return false
 	}
 	if len(candidateScopes) == 0 {
-		return true
+		return false
 	}
 	for _, candidate := range candidateScopes {
 		if p.HasScope(candidate) {
@@ -120,12 +122,14 @@ func (p *Principal) HasRole(role string) bool {
 }
 
 // HasAnyRole returns true if the principal has at least one of the candidate roles.
+// An empty candidateRoles list fails closed (returns false), the role-side counterpart
+// of the HasAnyScope fix above (Tier 0 #6).
 func (p *Principal) HasAnyRole(candidateRoles ...string) bool {
 	if p == nil {
 		return false
 	}
 	if len(candidateRoles) == 0 {
-		return true
+		return false
 	}
 	for _, candidate := range candidateRoles {
 		if p.HasRole(candidate) {

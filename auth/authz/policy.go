@@ -2,6 +2,8 @@ package authz
 
 import (
 	"context"
+
+	"github.com/JinishBhardwaj/shared-go/auth/principal"
 )
 
 // Requirement represents a single authorization condition or assertion, mirroring ASP.NET Core IAuthorizationRequirement.
@@ -45,6 +47,17 @@ func (r UserPresentRequirement) RequirementType() string { return "UserPresentRe
 type M2MRequirement struct{}
 
 func (r M2MRequirement) RequirementType() string { return "M2MRequirement" }
+
+// MethodRequirement enforces that the principal authenticated via one of the
+// allowed authentication methods / OAuth flows. Moved from the former
+// authn/guards.go (gap-analysis-final.md §3.8 step 6) so scope/role/method
+// gating has exactly one implementation instead of a second copy living in
+// authn as raw gin middleware.
+type MethodRequirement struct {
+	Methods []principal.AuthMethod
+}
+
+func (r MethodRequirement) RequirementType() string { return "MethodRequirement" }
 
 // CustomRequirement allows inline functional assertions.
 type CustomRequirement struct {
@@ -131,11 +144,20 @@ func (b *PolicyBuilder) RequireAnyScope(scopes ...string) *PolicyBuilder {
 	return b
 }
 
-// RequireRole asserts that the caller has the specified role(s).
+// RequireRole asserts that the caller has ALL the specified role(s).
 func (b *PolicyBuilder) RequireRole(roles ...string) *PolicyBuilder {
 	b.policy.Requirements = append(b.policy.Requirements, RoleRequirement{
 		Roles:      roles,
 		RequireAll: true,
+	})
+	return b
+}
+
+// RequireAnyRole asserts that the caller has AT LEAST ONE of the candidate roles.
+func (b *PolicyBuilder) RequireAnyRole(roles ...string) *PolicyBuilder {
+	b.policy.Requirements = append(b.policy.Requirements, RoleRequirement{
+		Roles:      roles,
+		RequireAll: false,
 	})
 	return b
 }
@@ -149,6 +171,15 @@ func (b *PolicyBuilder) RequireUser() *PolicyBuilder {
 // RequireM2M asserts that the caller is an automated M2M client.
 func (b *PolicyBuilder) RequireM2M() *PolicyBuilder {
 	b.policy.Requirements = append(b.policy.Requirements, M2MRequirement{})
+	return b
+}
+
+// RequireMethod asserts that the caller authenticated via one of the allowed
+// authentication methods / OAuth flows.
+func (b *PolicyBuilder) RequireMethod(methods ...principal.AuthMethod) *PolicyBuilder {
+	b.policy.Requirements = append(b.policy.Requirements, MethodRequirement{
+		Methods: methods,
+	})
 	return b
 }
 

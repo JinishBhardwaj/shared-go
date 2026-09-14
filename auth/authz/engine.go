@@ -50,12 +50,18 @@ func (h *RoleRequirementHandler) Handle(ctx context.Context, p *principal.Princi
 	if !ok {
 		return false, nil
 	}
-	for _, r := range rr.Roles {
-		if !p.HasRole(r) {
-			return false, nil
+	// Tier 0 #8: RequireAll was declared but ignored -- the handler always
+	// ANDed. Honor it: true means every role is required, false means at
+	// least one of them is (mirrors ScopeRequirementHandler's RequireAll).
+	if rr.RequireAll {
+		for _, r := range rr.Roles {
+			if !p.HasRole(r) {
+				return false, nil
+			}
 		}
+		return true, nil
 	}
-	return true, nil
+	return p.HasAnyRole(rr.Roles...), nil
 }
 
 // UserPresentHandler evaluates UserPresentRequirement.
@@ -70,6 +76,22 @@ type M2MHandler struct{}
 
 func (h *M2MHandler) Handle(ctx context.Context, p *principal.Principal, req Requirement, evalCtx *EvaluationContext) (bool, error) {
 	return p.Method == principal.AuthMethodClientCredentials || p.Method == principal.AuthMethodAPIKey, nil
+}
+
+// MethodRequirementHandler evaluates MethodRequirement.
+type MethodRequirementHandler struct{}
+
+func (h *MethodRequirementHandler) Handle(ctx context.Context, p *principal.Principal, req Requirement, evalCtx *EvaluationContext) (bool, error) {
+	mr, ok := req.(MethodRequirement)
+	if !ok {
+		return false, nil
+	}
+	for _, m := range mr.Methods {
+		if p.Method == m {
+			return true, nil
+		}
+	}
+	return false, nil
 }
 
 // CustomRequirementHandler evaluates CustomRequirement.
@@ -297,6 +319,7 @@ func NewAuthorizationService(opts *AuthorizationOptions, handlers ...Requirement
 	engine.handlers["RoleRequirement"] = &RoleRequirementHandler{}
 	engine.handlers["UserPresentRequirement"] = &UserPresentHandler{}
 	engine.handlers["M2MRequirement"] = &M2MHandler{}
+	engine.handlers["MethodRequirement"] = &MethodRequirementHandler{}
 	engine.handlers["CustomRequirement"] = &CustomRequirementHandler{}
 
 	if opts != nil {
@@ -333,6 +356,7 @@ func NewPolicyEngine(parcHandler ...*PARCHandler) *PolicyEngine {
 	e.handlers["RoleRequirement"] = &RoleRequirementHandler{}
 	e.handlers["UserPresentRequirement"] = &UserPresentHandler{}
 	e.handlers["M2MRequirement"] = &M2MHandler{}
+	e.handlers["MethodRequirement"] = &MethodRequirementHandler{}
 	e.handlers["CustomRequirement"] = &CustomRequirementHandler{}
 
 	if len(parcHandler) > 0 && parcHandler[0] != nil {
