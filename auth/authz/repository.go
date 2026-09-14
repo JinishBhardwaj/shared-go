@@ -10,16 +10,33 @@ var (
 	ErrPrincipalNotFound = errors.New("authz: principal has no permission records")
 )
 
-// PermissionRepository abstracts access to permission records in the application database.
-type PermissionRepository interface {
+// PermissionReader is the read-only subset of PermissionRepository consumed
+// by the authorization hot path (gap-analysis-final.md Tier 2: "Split
+// PermissionRepository into reader/writer -- the hot path needs only
+// GetPermissions").
+type PermissionReader interface {
 	// GetPermissions retrieves the full bundle of rules for a given principal.
 	GetPermissions(ctx context.Context, principalID string) (*PrincipalPermissions, error)
+}
 
+// PermissionWriter is the administrative subset of PermissionRepository --
+// granting and revoking permissions -- never called on the authorization
+// hot path.
+type PermissionWriter interface {
 	// GrantPermission appends a permission rule to the principal's record.
 	GrantPermission(ctx context.Context, principalID string, rule PermissionRule) error
 
 	// RevokeAll removes all permissions for a principal.
 	RevokeAll(ctx context.Context, principalID string) error
+}
+
+// PermissionRepository abstracts access to permission records in the
+// application database. Composed of PermissionReader and PermissionWriter;
+// existing implementations (e.g. MemoryPermissionRepository) satisfy it
+// unchanged.
+type PermissionRepository interface {
+	PermissionReader
+	PermissionWriter
 }
 
 // MemoryPermissionRepository is an in-memory thread-safe implementation of PermissionRepository.

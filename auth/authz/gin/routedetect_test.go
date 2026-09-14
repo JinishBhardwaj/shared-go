@@ -37,8 +37,9 @@ func consumerAuthorizeReports(c *gin.Context) {
 // (G6, item 1). Confirmed red against the pre-fix
 // strings.Contains(c.HandlerNames(), "Authorize"|...) hack: a request with
 // NO principal at all reached the final handler and returned 200, when it
-// should have been rejected by FallbackPolicy at 401. Confirmed green after
-// the fix.
+// should have been rejected by FallbackPolicy. Confirmed green after the
+// fix. (G8-5: the expected rejection status is 403, not 401 -- authz never
+// emits 401, that's authn's job.)
 func TestFallbackPolicy_DoesNotFalsePositiveOnUnrelatedConsumerHandlerName(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 
@@ -61,7 +62,7 @@ func TestFallbackPolicy_DoesNotFalsePositiveOnUnrelatedConsumerHandlerName(t *te
 	w := httptest.NewRecorder()
 	r.ServeHTTP(w, req)
 
-	if w.Code != http.StatusUnauthorized {
+	if w.Code != http.StatusForbidden {
 		t.Fatalf("expected FallbackPolicy to reject an unauthenticated request to an "+
 			"unprotected route whose only handler coincidentally contains \"Authorize\" "+
 			"in its name; got %d (body: %s) -- this is the Tier 1 line 97 false-positive "+

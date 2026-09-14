@@ -11,13 +11,14 @@ import (
 	"time"
 
 	"github.com/JinishBhardwaj/shared-go/auth/authn"
+	"github.com/JinishBhardwaj/shared-go/auth/authn/apikeys"
 	"github.com/JinishBhardwaj/shared-go/auth/authtest"
 	"github.com/JinishBhardwaj/shared-go/auth/principal"
 	ginprincipal "github.com/JinishBhardwaj/shared-go/auth/principal/gin"
 	"github.com/gin-gonic/gin"
 )
 
-func setupTestRouter(t *testing.T) (*gin.Engine, *authtest.MockOAuthProvider, *authn.MemoryAPIKeyStore, string) {
+func setupTestRouter(t *testing.T) (*gin.Engine, *authtest.MockOAuthProvider, *apikeys.MemoryAPIKeyStore, string) {
 	t.Helper()
 	gin.SetMode(gin.TestMode)
 
@@ -26,7 +27,7 @@ func setupTestRouter(t *testing.T) (*gin.Engine, *authtest.MockOAuthProvider, *a
 		t.Fatalf("failed creating oauth provider: %v", err)
 	}
 
-	keyStore := authn.NewMemoryAPIKeyStore()
+	keyStore := apikeys.NewMemoryAPIKeyStore()
 	sampleAPIKey, _, err := keyStore.CreateKey("dev_owner_1", "dev-cli", "Developer Key", []string{"read:reports"}, []string{"admin"}, 24*time.Hour)
 	if err != nil {
 		t.Fatalf("failed creating api key: %v", err)
@@ -330,7 +331,7 @@ func TestHandleAuthError_KnownErrorMapsToFixedCode(t *testing.T) {
 }
 
 func TestMiddleware_ClaimsTransformer(t *testing.T) {
-	keyStore := authn.NewMemoryAPIKeyStore()
+	keyStore := apikeys.NewMemoryAPIKeyStore()
 	sampleKey, _, err := keyStore.CreateKey("owner-1", "client-1", "TestKey", []string{"read"}, []string{"user"}, 1*time.Hour)
 	if err != nil {
 		t.Fatalf("failed to create key: %v", err)

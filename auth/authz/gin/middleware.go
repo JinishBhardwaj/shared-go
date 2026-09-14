@@ -198,23 +198,26 @@ func AuthorizeResource(c *gin.Context, resource authz.Resource, policyName strin
 	return result
 }
 
-// handleResult writes the appropriate 401 or 403 HTTP response. Tier 0 #7:
-// result.FailureReason is deliberately NOT echoed here -- see httpsec.go.
-// The real reason is logged server-side only.
+// handleResult writes the HTTP response for a failed authorization result.
+// authz never emits 401 -- that is authn's job (gap-analysis-final.md Tier 2
+// line 107, G8-5): a FailedResult carrying descAuthenticationRequired here
+// means New()'s FallbackPolicy check found no principal in context, a
+// misconfiguration/missing-authn condition, not a credential challenge, so
+// it is answered exactly like any other authorization failure -- 403, no
+// WWW-Authenticate (that header exists to accompany a 401 challenge, which
+// this package no longer issues). Tier 0 #7: result.FailureReason is
+// deliberately NOT echoed here -- see httpsec.go. The real reason is logged
+// server-side only.
 func handleResult(c *gin.Context, result authz.AuthorizationResult, policyName string, customHandler ResultHandler) {
 	if customHandler != nil {
 		customHandler(c, result, policyName)
 		return
 	}
 
-	status := http.StatusForbidden
 	if !result.Succeeded && result.FailureReason == descAuthenticationRequired {
 		logAuthzDenial("request", result.FailureReason)
-		status = http.StatusUnauthorized
-		c.Header("WWW-Authenticate", fmt.Sprintf("Bearer error=%s, error_description=%s",
-			quoteRFC7235(rfc6750Unauthorized), quoteRFC7235(descAuthenticationRequired)))
-		c.JSON(status, gin.H{
-			"error":             rfc6750Unauthorized,
+		c.JSON(http.StatusForbidden, gin.H{
+			"error":             "forbidden",
 			"error_description": descAuthenticationRequired,
 		})
 		return
@@ -223,7 +226,7 @@ func handleResult(c *gin.Context, result authz.AuthorizationResult, policyName s
 	logAuthzDenial(fmt.Sprintf("policy %q", policyName), result.FailureReason)
 	c.Header("WWW-Authenticate", fmt.Sprintf("Bearer error=%s, error_description=%s",
 		quoteRFC7235(rfc6750InsufficientScope), quoteRFC7235(descAccessDeniedByPolicy)))
-	c.JSON(status, gin.H{
+	c.JSON(http.StatusForbidden, gin.H{
 		"error":             "forbidden",
 		"error_description": descAccessDeniedByPolicy,
 		"policy":            policyName,

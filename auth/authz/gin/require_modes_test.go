@@ -39,8 +39,10 @@ func TestRequireScope(t *testing.T) {
 	granted := &principal.Principal{Subject: "u1", Scopes: []string{"read:reports", "write:orders"}}
 	partial := &principal.Principal{Subject: "u2", Scopes: []string{"read:reports"}}
 
-	if code := doGet(t, withPrincipal(nil, Require(WithScopes("read:reports")))); code != http.StatusUnauthorized {
-		t.Errorf("no principal: expected 401, got %d", code)
+	// G8-5: authz never emits 401 -- a missing principal is a 403, same as
+	// any other authorization failure (authn owns the 401 challenge).
+	if code := doGet(t, withPrincipal(nil, Require(WithScopes("read:reports")))); code != http.StatusForbidden {
+		t.Errorf("no principal: expected 403, got %d", code)
 	}
 	if code := doGet(t, withPrincipal(partial, Require(WithScopes("read:reports", "write:orders")))); code != http.StatusForbidden {
 		t.Errorf("missing one of two required scopes: expected 403, got %d", code)

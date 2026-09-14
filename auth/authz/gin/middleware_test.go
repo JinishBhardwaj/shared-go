@@ -87,8 +87,14 @@ func TestUseAuthorizationMiddleware(t *testing.T) {
 		w := httptest.NewRecorder()
 		r.ServeHTTP(w, req)
 
-		if w.Code != http.StatusUnauthorized {
-			t.Fatalf("expected 401 Unauthorized, got %d", w.Code)
+		// G8-5: authz never emits 401 -- that's authn's job. A missing
+		// principal at FallbackPolicy time is a 403, same as any other
+		// authorization failure.
+		if w.Code != http.StatusForbidden {
+			t.Fatalf("expected 403 Forbidden, got %d", w.Code)
+		}
+		if hdr := w.Header().Get("WWW-Authenticate"); hdr != "" {
+			t.Fatalf("expected no WWW-Authenticate header on a 403 no-principal denial, got %q", hdr)
 		}
 	})
 

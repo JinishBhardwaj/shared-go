@@ -57,12 +57,17 @@ func TestGinGuard_RequirePolicyAndPARC(t *testing.T) {
 		},
 	)
 
-	// 1. Unauthenticated request -> 401
+	// 1. Unauthenticated request -> 403 (G8-5: authz never emits 401 --
+	// that's authn's job -- so a missing principal is denied with the same
+	// status as any other authorization failure).
 	reqUnauth, _ := http.NewRequest("GET", "/reports/rep_public_1", nil)
 	w1 := httptest.NewRecorder()
 	r.ServeHTTP(w1, reqUnauth)
-	if w1.Code != http.StatusUnauthorized {
-		t.Errorf("expected 401, got %d", w1.Code)
+	if w1.Code != http.StatusForbidden {
+		t.Errorf("expected 403, got %d", w1.Code)
+	}
+	if hdr := w1.Header().Get("WWW-Authenticate"); hdr != "" {
+		t.Errorf("no principal in context is a 403, not a 401 challenge -- expected no WWW-Authenticate header, got %q", hdr)
 	}
 
 	// 2. Authenticated user accessing allowed report -> 200 OK
@@ -152,5 +157,52 @@ func TestRequirePARC_NeverLeaksRawInternalErrorText(t *testing.T) {
 
 	if strings.Contains(hdr, "\r") || strings.Contains(hdr, "\n") {
 		t.Errorf("WWW-Authenticate header contains an embedded CR/LF (header injection): %q", hdr)
+	}
+}
+
+// TestRequire_NeverEmits401_NoPrincipalInContext is the G8-5 regression test
+// (gap-analysis-final.md Tier 2 line 107, "authz emits 403 only"): every
+// Require(...) mode must deny a request with no principal in context using
+// 403, never 401 -- authn owns the 401 challenge, authz only ever answers
+// with "forbidden." Covers all seven modes (policy, PARC, scope-all,
+// scope-any, role-all, role-any, method) plus the direct-attach path through
+// New()'s FallbackPolicy/handleResult, in one pass.
+func TestRequire_NeverEmits401_NoPrincipalInContext(t *testing.T) {
+	repo := authz.NewMemoryPermissionRepository()
+	parcHandler, _ := authz.NewPARCHandler(authz.PARCHandlerConfig{Repository: repo})
+	engine := authz.NewPolicyEngine(parcHandler)
+	engine.RegisterPolicy(authz.NewPolicy("SomePolicy").RequireRole("admin").Build())
+
+	guards := map[string]gin.HandlerFunc{
+		"WithPolicyName": Require(WithEngine(engine), WithPolicyName("SomePolicy")),
+		"WithPARC":       Require(WithEngine(engine), WithPARC("read", "report")),
+		"WithScopes":     Require(WithScopes("read:reports")),
+		"WithAnyScope":   Require(WithAnyScope("read:reports")),
+		"WithRoles":      Require(WithRoles("admin")),
+		"WithAnyRole":    Require(WithAnyRole("admin")),
+		"WithMethods":    Require(WithMethods(principal.AuthMethodAPIKey)),
+	}
+
+	for name, guard := range guards {
+		t.Run(name, func(t *testing.T) {
+			r := gin.New()
+			// Deliberately NO authn middleware at all: no principal is ever
+			// set on the request, simulating a misconfigured or skipped
+			// authn stage ahead of this guard.
+			r.GET("/protected", guard, func(c *gin.Context) {
+				c.JSON(http.StatusOK, gin.H{"status": "ok"})
+			})
+
+			req, _ := http.NewRequest(http.MethodGet, "/protected", nil)
+			w := httptest.NewRecorder()
+			r.ServeHTTP(w, req)
+
+			if w.Code != http.StatusForbidden {
+				t.Errorf("expected 403 (never 401) with no principal in context, got %d: %s", w.Code, w.Body.String())
+			}
+			if hdr := w.Header().Get("WWW-Authenticate"); hdr != "" {
+				t.Errorf("expected no WWW-Authenticate header on a 403 no-principal denial, got %q", hdr)
+			}
+		})
 	}
 }

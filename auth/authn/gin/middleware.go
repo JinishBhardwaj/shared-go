@@ -8,6 +8,7 @@ import (
 	"strings"
 
 	"github.com/JinishBhardwaj/shared-go/auth/authn"
+	"github.com/JinishBhardwaj/shared-go/auth/authn/apikeys"
 	"github.com/JinishBhardwaj/shared-go/auth/principal"
 	ginprincipal "github.com/JinishBhardwaj/shared-go/auth/principal/gin"
 	"github.com/gin-gonic/gin"
@@ -144,10 +145,10 @@ func handleAuthError(c *gin.Context, err error, cfg MiddlewareConfig) {
 	case errors.Is(err, ErrNoCredentialsFound):
 		errCode = rfc6750Unauthorized
 		errDesc = "No credentials provided"
-	case errors.Is(err, authn.ErrTokenExpired), errors.Is(err, authn.ErrAPIKeyExpired):
+	case errors.Is(err, authn.ErrTokenExpired), errors.Is(err, apikeys.ErrAPIKeyExpired):
 		errCode = rfc6750InvalidToken
 		errDesc = "The credential has expired"
-	case errors.Is(err, authn.ErrAPIKeyRevoked):
+	case errors.Is(err, apikeys.ErrAPIKeyRevoked):
 		errCode = rfc6750InvalidToken
 		errDesc = "The API key has been revoked"
 	case errors.Is(err, ErrMultipleCredTypes):

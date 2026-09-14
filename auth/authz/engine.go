@@ -258,8 +258,9 @@ func (o CacheOutcome) String() string {
 
 // PARCHandlerConfig configures the PARC authorization handler.
 type PARCHandlerConfig struct {
-	// Repository is the application database containing permission records.
-	Repository PermissionRepository
+	// Repository is the application database containing permission records
+	// (read-only -- the hot path never grants or revokes).
+	Repository PermissionReader
 
 	// Cache is a typed cache.Cache[*PrincipalPermissions] (L1 memory,
 	// L1+L2 tiered, or any other cache.Cache[T] implementation).
@@ -304,7 +305,7 @@ type PARCHandlerConfig struct {
 
 // PARCHandler evaluates PARCRequirement with high-performance caching (10k+ RPS).
 type PARCHandler struct {
-	repo           PermissionRepository
+	repo           PermissionReader
 	cache          cache.Cache[*PrincipalPermissions]
 	grantTTL       time.Duration
 	staleTTL       time.Duration
@@ -522,6 +523,32 @@ func (d Decision) ToResult() AuthorizationResult {
 	return AuthorizationResult{Succeeded: d.Allowed, FailureReason: d.Reason}
 }
 
+// Authorizer is the decision-making contract extracted from PolicyEngine
+// (gap-analysis-final.md Tier 2: "Extract Authorizer + PolicyRegistry
+// interfaces from PolicyEngine. Two, not four."). It mirrors ASP.NET Core's
+// IAuthorizationService: given a principal and a policy (by name or value),
+// produce a decision. PolicyEngine implements this today; this interface
+// exists so a future caller/decorator (e.g. the Tier 4 OnDecision/audit
+// wrapper) can depend on the narrower contract instead of the full
+// PolicyEngine concrete type.
+type Authorizer interface {
+	Authorize(ctx context.Context, principal *principal.Principal, policyName string, evalCtx *EvaluationContext) (AuthorizationResult, error)
+	EvaluatePolicy(ctx context.Context, policyName string, principal *principal.Principal, evalCtx *EvaluationContext) (Decision, error)
+	Evaluate(ctx context.Context, policy Policy, principal *principal.Principal, evalCtx *EvaluationContext) (Decision, error)
+}
+
+// PolicyRegistry is the registration/lookup contract extracted from
+// PolicyEngine (same Tier 2 item as Authorizer above). It covers
+// wiring-time policy and handler registration plus the two named-policy
+// lookups (DefaultPolicy/FallbackPolicy) that the authz/gin middleware
+// consults. PolicyEngine implements this today.
+type PolicyRegistry interface {
+	RegisterPolicy(policy Policy)
+	RegisterHandler(requirementType string, handler RequirementHandler)
+	DefaultPolicy() *Policy
+	FallbackPolicy() *Policy
+}
+
 // PolicyEngine is the Policy Decision Point (PDP) that coordinates policy evaluation.
 // Mirrors ASP.NET Core IAuthorizationService.
 type PolicyEngine struct {
@@ -541,6 +568,11 @@ type PolicyEngine struct {
 	// built is true once Build() has been called; see Build's doc comment.
 	built bool
 }
+
+var (
+	_ Authorizer     = (*PolicyEngine)(nil)
+	_ PolicyRegistry = (*PolicyEngine)(nil)
+)
 
 // DecisionEvent describes the outcome of one PolicyEngine.Evaluate /
 // EvaluatePolicy call, reported to the optional OnDecision hook (see

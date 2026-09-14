@@ -152,8 +152,14 @@ func TestProtectGroup_SkipsFallbackPolicy_DirectAttachDoesNot(t *testing.T) {
 		req, _ := http.NewRequest(http.MethodGet, "/scoped", nil)
 		w := httptest.NewRecorder()
 		r.ServeHTTP(w, req)
-		if w.Code != http.StatusUnauthorized && w.Code != http.StatusForbidden {
-			t.Fatalf("expected FallbackPolicy to still reject a client-credentials principal (RequireUser fails), got %d: %s", w.Code, w.Body.String())
+		// G8-5: authz never emits 401 (that's authn's job), so this
+		// RequireUser-shaped FallbackPolicy denial is always 403, not 401 --
+		// this principal IS present in context (it just fails the
+		// FallbackPolicy's method requirement), so this exercises the
+		// ordinary policy-denial path, not the no-principal path, but both
+		// now converge on 403.
+		if w.Code != http.StatusForbidden {
+			t.Fatalf("expected FallbackPolicy to still reject a client-credentials principal (RequireUser fails) with 403, got %d: %s", w.Code, w.Body.String())
 		}
 	})
 

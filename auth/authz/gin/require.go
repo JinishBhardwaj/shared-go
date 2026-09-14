@@ -314,11 +314,19 @@ func requirePolicyGuard(c *gin.Context, cfg *requireConfig) {
 
 	user := ginprincipal.User(c)
 	if user == nil {
-		c.Header("WWW-Authenticate", fmt.Sprintf("Bearer error=%s, error_description=%s",
-			quoteRFC7235(rfc6750Unauthorized), quoteRFC7235(descAuthenticationRequired)))
-		c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{
-			"error":             rfc6750Unauthorized,
+		// authz never emits 401 -- that is authn's job (gap-analysis-final.md
+		// Tier 2 line 107, G8-5). No principal in context here means authn
+		// did not run (or ran and found nothing) ahead of this guard -- a
+		// misconfiguration/missing-authn condition, not a credential
+		// challenge -- so it is answered exactly like any other
+		// authorization failure: 403, with no WWW-Authenticate (that header
+		// exists to accompany a 401 challenge, which this package no longer
+		// issues; see httpsec.go).
+		logAuthzDenial(fmt.Sprintf("policy %q", cfg.policyName), "no principal in context")
+		c.AbortWithStatusJSON(http.StatusForbidden, gin.H{
+			"error":             "forbidden",
 			"error_description": descAuthenticationRequired,
+			"policy":            cfg.policyName,
 		})
 		return
 	}
@@ -375,11 +383,14 @@ func requirePARCGuard(c *gin.Context, cfg *requireConfig, inlinePolicy authz.Pol
 
 	user := ginprincipal.User(c)
 	if user == nil {
-		c.Header("WWW-Authenticate", fmt.Sprintf("Bearer error=%s, error_description=%s",
-			quoteRFC7235(rfc6750Unauthorized), quoteRFC7235(descAuthenticationRequired)))
-		c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{
-			"error":             rfc6750Unauthorized,
+		// authz never emits 401 -- same reasoning as requirePolicyGuard
+		// above (gap-analysis-final.md Tier 2 line 107, G8-5).
+		logAuthzDenial(fmt.Sprintf("PARC action=%q resource_type=%q", cfg.parcAction, cfg.parcResource), "no principal in context")
+		c.AbortWithStatusJSON(http.StatusForbidden, gin.H{
+			"error":             "forbidden",
 			"error_description": descAuthenticationRequired,
+			"action":            cfg.parcAction,
+			"resource_type":     cfg.parcResource,
 		})
 		return
 	}
@@ -432,7 +443,7 @@ func requirePARCGuard(c *gin.Context, cfg *requireConfig, inlinePolicy authz.Pol
 func requireScopeGuard(c *gin.Context, scopes []string, all bool) {
 	user := ginprincipal.User(c)
 	if user == nil {
-		respondUnauthenticated(c)
+		respondNoPrincipalForbidden(c)
 		return
 	}
 
@@ -468,7 +479,7 @@ func requireScopeGuard(c *gin.Context, scopes []string, all bool) {
 func requireRoleGuard(c *gin.Context, roles []string, all bool) {
 	user := ginprincipal.User(c)
 	if user == nil {
-		respondUnauthenticated(c)
+		respondNoPrincipalForbidden(c)
 		return
 	}
 
@@ -498,7 +509,7 @@ func requireRoleGuard(c *gin.Context, roles []string, all bool) {
 func requireMethodGuard(c *gin.Context, methods []principal.AuthMethod) {
 	user := ginprincipal.User(c)
 	if user == nil {
-		respondUnauthenticated(c)
+		respondNoPrincipalForbidden(c)
 		return
 	}
 
@@ -520,10 +531,18 @@ func requireMethodGuard(c *gin.Context, methods []principal.AuthMethod) {
 	c.Next()
 }
 
-func respondUnauthenticated(c *gin.Context) {
-	c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{
-		"error":             "unauthorized",
-		"error_description": "Authentication required",
+// respondNoPrincipalForbidden answers a request that reached one of the
+// scope/role/method guards with no principal in context. authz never emits
+// 401 -- that is authn's job (gap-analysis-final.md Tier 2 line 107, G8-5)
+// -- so this is a 403 like any other authorization failure, with no
+// WWW-Authenticate (that header exists to accompany a 401 challenge, which
+// this package no longer issues; see httpsec.go). Formerly named
+// respondUnauthenticated and returned 401; renamed alongside the behavior
+// change so the name matches what it actually does.
+func respondNoPrincipalForbidden(c *gin.Context) {
+	c.AbortWithStatusJSON(http.StatusForbidden, gin.H{
+		"error":             "forbidden",
+		"error_description": descAuthenticationRequired,
 	})
 }
 

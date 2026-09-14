@@ -5,11 +5,12 @@ import (
 	"testing"
 	"time"
 
+	"github.com/JinishBhardwaj/shared-go/auth/authn/apikeys"
 	"github.com/JinishBhardwaj/shared-go/auth/principal"
 )
 
 func TestAPIKeyValidator_SuccessAndExpiration(t *testing.T) {
-	store := NewMemoryAPIKeyStore()
+	store := apikeys.NewMemoryAPIKeyStore()
 	validator, err := NewAPIKeyValidator(store)
 	if err != nil {
 		t.Fatalf("unexpected error creating validator: %v", err)
@@ -57,7 +58,7 @@ func TestAPIKeyValidator_SuccessAndExpiration(t *testing.T) {
 		t.Fatalf("failed revoking key: %v", err)
 	}
 	_, err = validator.ValidateKey(ctx, rawKey)
-	if err != ErrAPIKeyRevoked {
+	if err != apikeys.ErrAPIKeyRevoked {
 		t.Errorf("expected ErrAPIKeyRevoked, got %v", err)
 	}
 
@@ -75,19 +76,19 @@ func TestAPIKeyValidator_SuccessAndExpiration(t *testing.T) {
 	}
 
 	_, err = validator.ValidateKey(ctx, expiredKey)
-	if err != ErrAPIKeyExpired {
+	if err != apikeys.ErrAPIKeyExpired {
 		t.Errorf("expected ErrAPIKeyExpired, got %v", err)
 	}
 
 	// 4. Unknown Key
 	_, err = validator.ValidateKey(ctx, "ak_live_unknownkey123456789")
-	if err != ErrAPIKeyNotFound {
+	if err != apikeys.ErrAPIKeyNotFound {
 		t.Errorf("expected ErrAPIKeyNotFound, got %v", err)
 	}
 
 	// 5. Empty Key
 	_, err = validator.ValidateKey(ctx, "")
-	if err != ErrAPIKeyNotFound {
+	if err != apikeys.ErrAPIKeyNotFound {
 		t.Errorf("expected ErrAPIKeyNotFound, got %v", err)
 	}
 }

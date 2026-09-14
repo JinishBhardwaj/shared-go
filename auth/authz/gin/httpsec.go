@@ -7,28 +7,33 @@ import (
 
 // RFC 6750 (Bearer Token Usage §3.1) defines a closed error-code vocabulary
 // for the WWW-Authenticate challenge: invalid_request, invalid_token,
-// insufficient_scope. "unauthorized" is not part of that registry but is
-// this package's own long-standing, fixed, non-leaking convention for "no
-// authenticated principal is present" (kept for response-shape
-// compatibility -- it carries no dynamic content, so it's as safe as the
-// three RFC-defined codes).
+// insufficient_scope. This package never emits a 401/challenge response at
+// all (G8-5, gap-analysis-final.md Tier 2 line 107: "authz emits 403 only
+// ... Challenges are authn's job") -- a missing principal in context is
+// answered with 403 like any other authorization failure, not a
+// WWW-Authenticate challenge. Only "insufficient_scope" remains, used as the
+// auth-param value on the insufficient-scope/insufficient-permission 403
+// paths below. (The former "unauthorized" auth-param value, this package's
+// own non-RFC convention for "no authenticated principal is present", was
+// removed with the 401 code paths that used it -- see require.go's
+// requirePolicyGuard/requirePARCGuard/respondNoPrincipalForbidden and
+// middleware.go's handleResult.)
 //
 // Tier 0 #7: the built-in response writers in this package
-// (middleware.go's handleResult, guard.go's RequirePolicy/RequirePARC) must
-// never place Decision.Reason / AuthorizationResult.FailureReason verbatim
-// into the WWW-Authenticate header or the default JSON body. That value
-// can be built from an arbitrary wrapped error -- e.g. a
-// PermissionRepository/cache failure surfaces as err.Error() via
-// authz/engine.go's Evaluate -- and can contain DB internals or characters
-// (quotes, CR/LF) that break the header's quoted-string. Every
-// error_description written by the default handlers in this package is a
-// fixed literal; the real reason is logged server-side only via
-// logAuthzDenial, never echoed to the caller. A caller-supplied
+// (middleware.go's handleResult, require.go's requirePolicyGuard/
+// requirePARCGuard/requireScopeGuard) must never place Decision.Reason /
+// AuthorizationResult.FailureReason verbatim into the WWW-Authenticate
+// header or the default JSON body. That value can be built from an
+// arbitrary wrapped error -- e.g. a PermissionRepository/cache failure
+// surfaces as err.Error() via authz/engine.go's Evaluate -- and can contain
+// DB internals or characters (quotes, CR/LF) that break the header's
+// quoted-string. Every error_description written by the default handlers in
+// this package is a fixed literal; the real reason is logged server-side
+// only via logAuthzDenial, never echoed to the caller. A caller-supplied
 // ResultHandler is a different, explicit opt-in boundary and still
 // receives the full, unsanitized AuthorizationResult -- sanitizing that
 // path is this application's own choice, not this library's default.
 const (
-	rfc6750Unauthorized      = "unauthorized"
 	rfc6750InsufficientScope = "insufficient_scope"
 )
 
