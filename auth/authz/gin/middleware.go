@@ -26,6 +26,7 @@ type MiddlewareConfig struct {
 	resultHandler  ResultHandler
 	fallbackPolicy *authz.Policy
 	defaultPolicy  *authz.Policy
+	actionResolver ActionResolver
 }
 
 // MiddlewareOption configures the authorization middleware.
@@ -53,6 +54,17 @@ func WithDefaultPolicy(policy authz.Policy) MiddlewareOption {
 	}
 }
 
+// WithFallbackActionResolver overrides how the FallbackPolicy check derives a
+// logical Action.Name from the incoming request's HTTP verb (Tier 1 line 98,
+// "Unify action semantics"). Defaults to DefaultActionResolver. (Named
+// distinctly from Require's own WithActionResolver, which configures a single
+// route guard rather than this middleware-wide default.)
+func WithFallbackActionResolver(resolver ActionResolver) MiddlewareOption {
+	return func(cfg *MiddlewareConfig) {
+		cfg.actionResolver = resolver
+	}
+}
+
 // UseAuthorization creates a pipeline authorization middleware (mirrors ASP.NET Core app.UseAuthorization()).
 func UseAuthorization(service *authz.PolicyEngine, opts ...MiddlewareOption) gin.HandlerFunc {
 	return New(service, opts...)
@@ -67,6 +79,7 @@ func New(service *authz.PolicyEngine, opts ...MiddlewareOption) gin.HandlerFunc 
 	cfg := MiddlewareConfig{
 		fallbackPolicy: service.FallbackPolicy(),
 		defaultPolicy:  service.DefaultPolicy(),
+		actionResolver: defaultActionResolver,
 	}
 	for _, opt := range opts {
 		opt(&cfg)
@@ -94,7 +107,7 @@ func New(service *authz.PolicyEngine, opts ...MiddlewareOption) gin.HandlerFunc 
 
 				evalCtx := &authz.EvaluationContext{
 					Action: authz.Action{
-						Name:       c.Request.Method,
+						Name:       cfg.actionResolver(c.Request.Method),
 						HTTPMethod: c.Request.Method,
 					},
 					Context: authz.Context{
@@ -168,7 +181,7 @@ func AuthorizeResource(c *gin.Context, resource authz.Resource, policyName strin
 
 	evalCtx := &authz.EvaluationContext{
 		Action: authz.Action{
-			Name:       c.Request.Method,
+			Name:       defaultActionResolver(c.Request.Method),
 			HTTPMethod: c.Request.Method,
 		},
 		Resource: resource,

@@ -85,6 +85,42 @@ func TestAuthenticationBuilder(t *testing.T) {
 	}
 }
 
+// TestAuthenticationBuilder_BuildFailsWithNoValidatorConfigured is the Tier 1
+// regression test (gap-analysis-final.md: "Fail at wire time, not request
+// time"). Build() must reject a builder with neither a bearer nor an API key
+// validator configured instead of silently succeeding and only surfacing the
+// misconfiguration per-request as ErrAuthenticatorNotConfigured.
+func TestAuthenticationBuilder_BuildFailsWithNoValidatorConfigured(t *testing.T) {
+	authenticator, err := NewBuilder().Build()
+
+	if err == nil {
+		t.Fatal("expected an error building with no validator configured, got nil")
+	}
+	if authenticator != nil {
+		t.Fatalf("expected a nil Authenticator, got %v", authenticator)
+	}
+}
+
+// TestAuthenticationBuilder_BuildSucceedsWithBearerValidatorConfigured proves
+// the new no-validator-configured check does not false-positive when a
+// bearer validator is configured.
+func TestAuthenticationBuilder_BuildSucceedsWithBearerValidatorConfigured(t *testing.T) {
+	val := &mockValidator{
+		principal: &principal.Principal{
+			Subject: "user_123",
+		},
+	}
+
+	authenticator, err := NewBuilder().WithBearerValidator(val).Build()
+
+	if err != nil {
+		t.Fatalf("unexpected error building authenticator: %v", err)
+	}
+	if authenticator == nil {
+		t.Fatal("expected a non-nil Authenticator")
+	}
+}
+
 // mockOIDCServer spins up a minimal OIDC discovery + JWKS server for tests
 // that need WithCognito to perform real (not KeyFunc-stubbed) OIDC
 // discovery/verification.

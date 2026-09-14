@@ -15,14 +15,15 @@ import (
 func TestAuthorizationBuilder(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 
-	middleware, err := NewBuilder().
+	builder := NewBuilder().
 		AddPolicy("AdminOnly", authz.NewPolicyBuilder().RequireRole("admin").Build()).
-		WithMemoryPARC(30 * time.Second).
-		BuildMiddleware()
+		WithMemoryPARC(30 * time.Second)
 
+	engine, err := builder.Build()
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
+	middleware := UseAuthorization(engine, builder.middlewareOptions...)
 
 	r := gin.New()
 	r.Use(func(c *gin.Context) {
@@ -36,7 +37,12 @@ func TestAuthorizationBuilder(t *testing.T) {
 	})
 	r.Use(middleware)
 
-	r.GET("/admin", Require(WithPolicyName("AdminOnly")), func(c *gin.Context) {
+	// WithEngine(...) is now mandatory for the WithPolicyName mode
+	// (gap-analysis-final.md Tier 1 line 100, authz half -- "fail at wire
+	// time, not request time"): Require(...) panics at construction time if
+	// omitted, so this test's engine is supplied explicitly rather than
+	// relying on the middleware's context registration.
+	r.GET("/admin", Require(WithEngine(engine), WithPolicyName("AdminOnly")), func(c *gin.Context) {
 		c.String(http.StatusOK, "admin granted")
 	})
 
@@ -55,13 +61,14 @@ func TestAuthorizationBuilder(t *testing.T) {
 func TestAuthorizationBuilderForbidden(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 
-	middleware, err := NewBuilder().
-		AddPolicy("AdminOnly", authz.NewPolicyBuilder().RequireRole("admin").Build()).
-		BuildMiddleware()
+	builder := NewBuilder().
+		AddPolicy("AdminOnly", authz.NewPolicyBuilder().RequireRole("admin").Build())
 
+	engine, err := builder.Build()
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
+	middleware := UseAuthorization(engine, builder.middlewareOptions...)
 
 	r := gin.New()
 	r.Use(func(c *gin.Context) {
@@ -74,7 +81,9 @@ func TestAuthorizationBuilderForbidden(t *testing.T) {
 	})
 	r.Use(middleware)
 
-	r.GET("/admin", Require(WithPolicyName("AdminOnly")), func(c *gin.Context) {
+	// WithEngine(...) is now mandatory for the WithPolicyName mode -- see
+	// the identical note in TestAuthorizationBuilder above.
+	r.GET("/admin", Require(WithEngine(engine), WithPolicyName("AdminOnly")), func(c *gin.Context) {
 		c.String(http.StatusOK, "admin granted")
 	})
 

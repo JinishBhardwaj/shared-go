@@ -71,8 +71,14 @@ type PermissionRule struct {
 
 // Matches evaluates whether this rule applies to the incoming PARC Request.
 func (r *PermissionRule) Matches(req Request) bool {
-	// 1. Check Action
-	if !matchGlob(r.ActionPattern, req.Action.Name) && !matchGlob(r.ActionPattern, req.Action.HTTPMethod) {
+	// 1. Check Action. Tier 1 line 98 ("Unify action semantics"): ActionPattern
+	// is matched ONLY against the logical Action.Name -- never against
+	// Action.HTTPMethod. Before this fix, a rule matched if EITHER field
+	// matched, so a rule authored against the logical action vocabulary
+	// ("read") also granted for the raw HTTP verb ("GET") and vice versa,
+	// letting a rule written for one action model silently grant the other.
+	// Action.HTTPMethod remains on the struct for logging/observability only.
+	if !matchGlob(r.ActionPattern, req.Action.Name) {
 		return false
 	}
 

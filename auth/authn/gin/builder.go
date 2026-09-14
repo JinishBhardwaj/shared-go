@@ -2,12 +2,21 @@ package gin
 
 import (
 	"context"
+	"errors"
 	"fmt"
 
 	"github.com/JinishBhardwaj/shared-go/auth/authn"
 	"github.com/JinishBhardwaj/shared-go/auth/principal"
 	"github.com/gin-gonic/gin"
 )
+
+// ErrNoValidatorConfigured is returned by Build() when neither a bearer
+// token validator nor an API key validator has been configured. Tier 1:
+// "fail at wire time, not request time" -- without this check, Build()
+// would succeed with an authenticator that can never validate any
+// credential, and the misconfiguration would only surface per-request as
+// ErrAuthenticatorNotConfigured.
+var ErrNoValidatorConfigured = errors.New("authn: no bearer or API key validator configured -- call WithCognito/WithBearerValidator/WithApiKeyValidator before Build()")
 
 // CognitoOptions configures AWS Cognito authentication for the builder.
 type CognitoOptions struct {
@@ -138,6 +147,10 @@ func (b *AuthenticationBuilder) WithOption(opts ...Option) *AuthenticationBuilde
 func (b *AuthenticationBuilder) Build() (Authenticator, error) {
 	if b.err != nil {
 		return nil, b.err
+	}
+
+	if b.bearerValidator == nil && b.apiKeyValidator == nil {
+		return nil, ErrNoValidatorConfigured
 	}
 
 	extCfg := DefaultExtractorConfig()

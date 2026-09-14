@@ -73,8 +73,9 @@ func (m requireMode) String() string {
 }
 
 type requireConfig struct {
-	engine   *authz.PolicyEngine
-	resource ResourceExtractorFunc
+	engine         *authz.PolicyEngine
+	resource       ResourceExtractorFunc
+	actionResolver ActionResolver
 
 	mode         requireMode
 	policyName   string
@@ -88,8 +89,12 @@ type requireConfig struct {
 // RequireOption configures a Require(...) guard. Exactly one requirement-
 // defining option (WithPolicyName / WithPARC / WithScopes / WithAnyScope /
 // WithRoles / WithAnyRole / WithMethods / WithUserPresent / WithM2M) must be
-// supplied; WithEngine and WithResource are optional modifiers applicable to
-// the policy/PARC modes.
+// supplied. WithEngine is a MANDATORY modifier for the WithPolicyName/WithPARC
+// modes (Require panics at construction time if it is missing for either of
+// those two modes -- gap-analysis-final.md Tier 1 line 100, authz half:
+// "fail at wire time, not request time"); WithResource remains an optional
+// modifier applicable to the policy/PARC modes. WithEngine is ignored
+// entirely by the scope/role/method modes, which need no PolicyEngine at all.
 type RequireOption func(*requireConfig)
 
 // setMode records cfg's single requirement mode, panicking if one was
@@ -103,13 +108,18 @@ func setMode(cfg *requireConfig, m requireMode) {
 	cfg.mode = m
 }
 
-// WithEngine supplies the PolicyEngine used to evaluate WithPolicyName/
-// WithPARC modes. If omitted, the engine is resolved from the gin context at
-// request time (set by New()/UseAuthorization), mirroring the former
-// Authorize's context-fallback behavior. Ignored by the scope/role/method
-// modes, which (like their predecessors RequireScope/RequireRole/
-// RequireMethod) evaluate their single requirement directly and need no
-// PolicyEngine at all.
+// WithEngine supplies the PolicyEngine used to evaluate the WithPolicyName/
+// WithPARC modes. It is MANDATORY for those two modes: Require(...) panics at
+// its own construction time (not at first request) if either mode is
+// selected and WithEngine was not supplied (gap-analysis-final.md Tier 1
+// line 100, authz half -- "fail at wire time, not request time"). This is a
+// deliberate break from the package's earlier convenience pattern, where an
+// omitted WithEngine fell back to resolving the PolicyEngine from the gin
+// context at request time (set by New()/UseAuthorization); that fallback no
+// longer exists for these two modes. Ignored by the scope/role/method modes,
+// which (like their predecessors RequireScope/RequireRole/RequireMethod)
+// evaluate their single requirement directly and need no PolicyEngine at
+// all.
 func WithEngine(engine *authz.PolicyEngine) RequireOption {
 	return func(cfg *requireConfig) { cfg.engine = engine }
 }
@@ -118,6 +128,16 @@ func WithEngine(engine *authz.PolicyEngine) RequireOption {
 // Resource for the policy/PARC modes.
 func WithResource(extractor ResourceExtractorFunc) RequireOption {
 	return func(cfg *requireConfig) { cfg.resource = extractor }
+}
+
+// WithActionResolver overrides how the modePolicy (WithPolicyName) guard
+// derives a logical Action.Name from the incoming request's HTTP verb (Tier 1
+// line 98, "Unify action semantics"). Defaults to DefaultActionResolver.
+// Ignored by every other mode: WithPARC always supplies its own explicit
+// logical action, and the scope/role/method modes never populate Action at
+// all.
+func WithActionResolver(resolver ActionResolver) RequireOption {
+	return func(cfg *requireConfig) { cfg.actionResolver = resolver }
 }
 
 // WithPolicyName evaluates the named, pre-registered policy against the
@@ -230,6 +250,14 @@ func ExtractResourceFromParam(paramName, resourceType string) ResourceExtractorF
 // FallbackPolicy enforcement does NOT infer anything from a route's use of
 // Require -- see routes.go (Group/ProtectGroup) for how a route opts out of
 // FallbackPolicy explicitly.
+//
+// Require panics at this, its own construction time, in two cases (never
+// deferred into the returned gin.HandlerFunc, i.e. never at request time):
+// no requirement-defining option was supplied at all, or exactly one of the
+// WithPolicyName/WithPARC modes was selected without an accompanying
+// WithEngine(...) (gap-analysis-final.md Tier 1 line 100, authz half -- "fail
+// at wire time, not request time"). The scope/role/method modes need no
+// PolicyEngine and are unaffected by the second check.
 func Require(opts ...RequireOption) gin.HandlerFunc {
 	cfg := &requireConfig{}
 	for _, opt := range opts {
@@ -239,6 +267,10 @@ func Require(opts ...RequireOption) gin.HandlerFunc {
 		panic("authz: Require: no requirement option supplied -- provide exactly one of " +
 			"WithPolicyName/WithPARC/WithScopes/WithAnyScope/WithRoles/WithAnyRole/" +
 			"WithMethods/WithUserPresent/WithM2M")
+	}
+	if (cfg.mode == modePolicy || cfg.mode == modePARC) && cfg.engine == nil {
+		panic(fmt.Sprintf("authz: Require: %s requires WithEngine(...) to be supplied at "+
+			"construction time -- no PolicyEngine was provided", cfg.mode))
 	}
 
 	// The inline PARC policy is built once, at guard-construction time (not
@@ -270,32 +302,15 @@ func Require(opts ...RequireOption) gin.HandlerFunc {
 	}
 }
 
-// resolveEngine returns explicit if non-nil, else attempts to resolve the
-// PolicyEngine registered in c's context by New()/UseAuthorization. Mirrors
-// the former Authorize's context-fallback behavior, now shared by every mode
-// that needs an engine.
-func resolveEngine(c *gin.Context, explicit *authz.PolicyEngine) *authz.PolicyEngine {
-	if explicit != nil {
-		return explicit
-	}
-	if v, exists := c.Get(ContextKeyAuthorizationService); exists {
-		if e, ok := v.(*authz.PolicyEngine); ok {
-			return e
-		}
-	}
-	return nil
-}
-
 // requirePolicyGuard evaluates a named policy. Behavior carried over
 // verbatim from the former RequirePolicy (and byte-identical, by
 // inspection, to the former Authorize/WithPolicy's default response path
-// through handleResult) -- only the engine resolution is a strict superset
-// (context-fallback added).
+// through handleResult). cfg.engine is guaranteed non-nil here: Require(...)
+// panics at its own construction time if WithEngine was omitted for
+// modePolicy, so there is no request-time nil-engine path left to check
+// (gap-analysis-final.md Tier 1 line 100, authz half).
 func requirePolicyGuard(c *gin.Context, cfg *requireConfig) {
-	engine := resolveEngine(c, cfg.engine)
-	if engine == nil {
-		panic("authz: Require: no PolicyEngine provided via WithEngine and none found in context via UseAuthorization")
-	}
+	engine := cfg.engine
 
 	user := ginprincipal.User(c)
 	if user == nil {
@@ -313,9 +328,14 @@ func requirePolicyGuard(c *gin.Context, cfg *requireConfig) {
 		res = cfg.resource(c)
 	}
 
+	resolver := cfg.actionResolver
+	if resolver == nil {
+		resolver = defaultActionResolver
+	}
+
 	evalCtx := &authz.EvaluationContext{
 		Action: authz.Action{
-			Name:       c.Request.Method,
+			Name:       resolver(c.Request.Method),
 			HTTPMethod: c.Request.Method,
 		},
 		Resource: res,
@@ -345,12 +365,13 @@ func requirePolicyGuard(c *gin.Context, cfg *requireConfig) {
 }
 
 // requirePARCGuard evaluates an inline PARC requirement. Behavior carried
-// over verbatim from the former RequirePARC.
+// over verbatim from the former RequirePARC. cfg.engine is guaranteed
+// non-nil here: Require(...) panics at its own construction time if
+// WithEngine was omitted for modePARC, so there is no request-time
+// nil-engine path left to check (gap-analysis-final.md Tier 1 line 100,
+// authz half).
 func requirePARCGuard(c *gin.Context, cfg *requireConfig, inlinePolicy authz.Policy) {
-	engine := resolveEngine(c, cfg.engine)
-	if engine == nil {
-		panic("authz: Require: no PolicyEngine provided via WithEngine and none found in context via UseAuthorization")
-	}
+	engine := cfg.engine
 
 	user := ginprincipal.User(c)
 	if user == nil {

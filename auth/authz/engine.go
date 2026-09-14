@@ -89,12 +89,26 @@ func mapPARCPrincipal(evalCtx *EvaluationContext, p *principal.Principal) Princi
 }
 
 // RequirementHandler evaluates a specific requirement type, mirroring ASP.NET Core AuthorizationHandler<T>.
+//
+// RequirementType identifies the Requirement.RequirementType() key this
+// handler is registered under (gap-analysis-final.md Tier 1 line 95:
+// "Generic handler registry" -- NewAuthorizationService used to type-switch
+// for *PARCHandler and silently discard every other caller-supplied handler,
+// so the variadic ...RequirementHandler parameter was a lie for anything but
+// PARC). Built-in handlers return the same fixed string as their
+// corresponding Requirement type's own RequirementType(); a caller-supplied
+// handler for a named CustomRequirement (or any other custom Requirement
+// type) declares its own key here, and NewAuthorizationService now registers
+// every supplied handler generically by this value instead of discarding it.
 type RequirementHandler interface {
+	RequirementType() string
 	Handle(ctx context.Context, principal *principal.Principal, req Requirement, evalCtx *EvaluationContext) (bool, error)
 }
 
 // ScopeRequirementHandler evaluates ScopeRequirement.
 type ScopeRequirementHandler struct{}
+
+func (h *ScopeRequirementHandler) RequirementType() string { return "ScopeRequirement" }
 
 func (h *ScopeRequirementHandler) Handle(ctx context.Context, p *principal.Principal, req Requirement, evalCtx *EvaluationContext) (bool, error) {
 	sr, ok := req.(ScopeRequirement)
@@ -109,6 +123,8 @@ func (h *ScopeRequirementHandler) Handle(ctx context.Context, p *principal.Princ
 
 // RoleRequirementHandler evaluates RoleRequirement.
 type RoleRequirementHandler struct{}
+
+func (h *RoleRequirementHandler) RequirementType() string { return "RoleRequirement" }
 
 func (h *RoleRequirementHandler) Handle(ctx context.Context, p *principal.Principal, req Requirement, evalCtx *EvaluationContext) (bool, error) {
 	rr, ok := req.(RoleRequirement)
@@ -132,6 +148,8 @@ func (h *RoleRequirementHandler) Handle(ctx context.Context, p *principal.Princi
 // UserPresentHandler evaluates UserPresentRequirement.
 type UserPresentHandler struct{}
 
+func (h *UserPresentHandler) RequirementType() string { return "UserPresentRequirement" }
+
 func (h *UserPresentHandler) Handle(ctx context.Context, p *principal.Principal, req Requirement, evalCtx *EvaluationContext) (bool, error) {
 	return p.IsUserPresent(), nil
 }
@@ -139,12 +157,16 @@ func (h *UserPresentHandler) Handle(ctx context.Context, p *principal.Principal,
 // M2MHandler evaluates M2MRequirement.
 type M2MHandler struct{}
 
+func (h *M2MHandler) RequirementType() string { return "M2MRequirement" }
+
 func (h *M2MHandler) Handle(ctx context.Context, p *principal.Principal, req Requirement, evalCtx *EvaluationContext) (bool, error) {
 	return p.Method == principal.AuthMethodClientCredentials || p.Method == principal.AuthMethodAPIKey, nil
 }
 
 // MethodRequirementHandler evaluates MethodRequirement.
 type MethodRequirementHandler struct{}
+
+func (h *MethodRequirementHandler) RequirementType() string { return "MethodRequirement" }
 
 func (h *MethodRequirementHandler) Handle(ctx context.Context, p *principal.Principal, req Requirement, evalCtx *EvaluationContext) (bool, error) {
 	mr, ok := req.(MethodRequirement)
@@ -161,6 +183,20 @@ func (h *MethodRequirementHandler) Handle(ctx context.Context, p *principal.Prin
 
 // CustomRequirementHandler evaluates CustomRequirement.
 type CustomRequirementHandler struct{}
+
+// RequirementType always returns the fixed key "CustomRequirement", never a
+// specific CustomRequirement.Name value. This is deliberate: CustomRequirement's
+// own RequirementType() returns r.Name when set (so DecisionEvent/deny-reason
+// reporting stays specific and readable), but that means a *named*
+// CustomRequirement's dispatch key in Policy.Evaluate never equals
+// "CustomRequirement" and, before this fix, resolved to no handler at all --
+// silently denying every named custom requirement regardless of its Func's
+// actual result (gap-analysis-final.md Tier 1 line 95). Evaluate's dispatch
+// now falls back to whatever handler is registered under this fixed key for
+// any Requirement whose concrete type is CustomRequirement, so the Func is
+// reached and its result actually governs the decision again, exactly as an
+// unnamed CustomRequirement already worked.
+func (h *CustomRequirementHandler) RequirementType() string { return "CustomRequirement" }
 
 func (h *CustomRequirementHandler) Handle(ctx context.Context, p *principal.Principal, req Requirement, evalCtx *EvaluationContext) (bool, error) {
 	cr, ok := req.(CustomRequirement)
@@ -285,6 +321,12 @@ type PARCHandler struct {
 	breaker *gobreaker.CircuitBreaker[*PrincipalPermissions]
 	group   singleflight.Group
 }
+
+// RequirementType returns "PARCRequirement" -- see RequirementHandler's doc
+// comment. Registered generically by NewAuthorizationService/RegisterHandler
+// like any other handler now (Tier 1 line 95); previously NewAuthorizationService
+// special-cased *PARCHandler by type-switch instead of this mechanism.
+func (h *PARCHandler) RequirementType() string { return "PARCRequirement" }
 
 // NewPARCHandler creates an initialized PARC handler with caching.
 func NewPARCHandler(cfg PARCHandlerConfig) (*PARCHandler, error) {
@@ -483,11 +525,21 @@ func (d Decision) ToResult() AuthorizationResult {
 // PolicyEngine is the Policy Decision Point (PDP) that coordinates policy evaluation.
 // Mirrors ASP.NET Core IAuthorizationService.
 type PolicyEngine struct {
+	// mu guards policies, handlers, and built. Tier 1 line 99: RegisterPolicy
+	// and RegisterHandler used to mutate policies/handlers with no
+	// synchronization at all, racing with the map reads in
+	// EvaluatePolicy/Evaluate below if a caller registered after the engine
+	// was already serving live traffic. mu is a plain RWMutex rather than a
+	// sync.Map because reads (Evaluate/EvaluatePolicy, on the hot path) vastly
+	// outnumber writes (RegisterPolicy/RegisterHandler, wiring-time only).
+	mu             sync.RWMutex
 	policies       map[string]Policy
 	handlers       map[string]RequirementHandler
 	defaultPolicy  *Policy
 	fallbackPolicy *Policy
 	onDecision     func(context.Context, DecisionEvent)
+	// built is true once Build() has been called; see Build's doc comment.
+	built bool
 }
 
 // DecisionEvent describes the outcome of one PolicyEngine.Evaluate /
@@ -605,10 +657,16 @@ func NewAuthorizationService(opts *AuthorizationOptions, handlers ...Requirement
 		engine.fallbackPolicy = opts.FallbackPolicy
 	}
 
+	// Tier 1 line 95: register every supplied handler generically by its own
+	// declared RequirementType(), instead of type-switching for *PARCHandler
+	// and silently discarding anything else. A caller-supplied handler
+	// overrides a built-in one registered under the same key, mirroring
+	// RegisterHandler's own "registers or overrides" semantics below.
 	for _, h := range handlers {
-		if parc, ok := h.(*PARCHandler); ok {
-			engine.handlers["PARCRequirement"] = parc
+		if h == nil {
+			continue
 		}
+		engine.handlers[h.RequirementType()] = h
 	}
 
 	return engine
@@ -642,13 +700,42 @@ func NewPolicyEngine(parcHandler ...*PARCHandler) *PolicyEngine {
 }
 
 // RegisterPolicy adds a policy to the engine.
+//
+// Panics if called after Build() (Tier 1 line 99: "Freeze PolicyEngine at
+// Build() -- no post-serve registration, no unguarded map writes"). Calling
+// Build() is optional; an engine that never calls it accepts
+// RegisterPolicy calls for its entire lifetime, unchanged from before.
 func (e *PolicyEngine) RegisterPolicy(policy Policy) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	if e.built {
+		panic("authz: PolicyEngine: RegisterPolicy called after Build() -- policies must be registered before Build()")
+	}
 	e.policies[policy.Name] = policy
 }
 
 // RegisterHandler registers or overrides a handler for a requirement type.
+//
+// Panics if called after Build() -- see RegisterPolicy's doc comment.
 func (e *PolicyEngine) RegisterHandler(requirementType string, handler RequirementHandler) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	if e.built {
+		panic("authz: PolicyEngine: RegisterHandler called after Build() -- handlers must be registered before Build()")
+	}
 	e.handlers[requirementType] = handler
+}
+
+// Build freezes the PolicyEngine: no further RegisterPolicy/RegisterHandler
+// calls are permitted afterward (they panic -- see each method's doc
+// comment). Calling Build() is optional; an engine that never calls Build()
+// behaves exactly as before (RegisterPolicy/RegisterHandler remain callable,
+// still under the same lock as every read). Returns e for chaining.
+func (e *PolicyEngine) Build() *PolicyEngine {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	e.built = true
+	return e
 }
 
 // DefaultPolicy returns the configured default policy, if any.
@@ -670,7 +757,9 @@ func (e *PolicyEngine) Authorize(ctx context.Context, principal *principal.Princ
 // EvaluatePolicy evaluates a named policy against a Principal.
 func (e *PolicyEngine) EvaluatePolicy(ctx context.Context, policyName string, principal *principal.Principal, evalCtx *EvaluationContext) (Decision, error) {
 	start := time.Now()
+	e.mu.RLock()
 	policy, exists := e.policies[policyName]
+	e.mu.RUnlock()
 	if !exists {
 		d := Decision{Allowed: false, Reason: fmt.Sprintf("policy '%s' not found", policyName)}
 		e.emitDecision(ctx, policyName, d, "", start)
@@ -695,7 +784,24 @@ func (e *PolicyEngine) Evaluate(ctx context.Context, policy Policy, principal *p
 
 	for _, req := range policy.Requirements {
 		reqType := req.RequirementType()
+		e.mu.RLock()
 		handler, exists := e.handlers[reqType]
+		if !exists {
+			// Tier 1 line 95: a named CustomRequirement's own RequirementType()
+			// returns its Name, not "CustomRequirement", so the lookup above
+			// never finds a handler registered under the requirement's own
+			// name -- before this fallback, that meant every named
+			// CustomRequirement silently denied regardless of what its Func
+			// actually returned. Fall back to whatever handler is registered
+			// under the fixed "CustomRequirement" key (built-in
+			// CustomRequirementHandler by default, or a caller override) for
+			// any Requirement whose concrete type is CustomRequirement, so
+			// the Func is reached and genuinely governs the decision again.
+			if _, isCustom := req.(CustomRequirement); isCustom {
+				handler, exists = e.handlers["CustomRequirement"]
+			}
+		}
+		e.mu.RUnlock()
 		if !exists {
 			d := Decision{
 				Allowed: false,
