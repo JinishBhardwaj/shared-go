@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"sync"
 	"time"
 
 	"github.com/JinishBhardwaj/shared-go/auth/principal"
@@ -37,6 +38,18 @@ type EvaluationContext struct {
 	// cached value instead of rebuilding it. Deliberately unexported: the
 	// PARC-shaped Principal type and this cache are both authz-internal and
 	// are never constructed or read from outside the package.
+	//
+	// mu guards mappedPrincipal/mappedPrincipalFor. No current call site in
+	// this codebase shares one EvaluationContext across concurrent
+	// goroutines (every gin call site builds a fresh one per request), but
+	// -race caught a genuine unsynchronized read/write race here while
+	// testing G5's singleflight collapsing (which does call Handle
+	// concurrently, just against per-goroutine EvaluationContexts in the
+	// shipped code -- the race only showed up in a since-fixed test that
+	// shared one across goroutines). Guarding it properly here removes the
+	// latent hazard instead of leaving it to depend on every future caller
+	// happening to build a fresh context too.
+	mu                 sync.Mutex
 	mappedPrincipal    *Principal
 	mappedPrincipalFor *principal.Principal
 }
@@ -50,7 +63,13 @@ type EvaluationContext struct {
 // check is a defensive no-op today, not a workaround for an observed bug --
 // if evalCtx were ever reused across principals it would recompute rather
 // than silently return a mismatched cached copy.
+//
+// Guarded by evalCtx.mu so concurrent requirement-handler evaluation against
+// the same EvaluationContext (e.g. a future caller that shares one across
+// goroutines) is safe, not just safe-by-convention.
 func mapPARCPrincipal(evalCtx *EvaluationContext, p *principal.Principal) Principal {
+	evalCtx.mu.Lock()
+	defer evalCtx.mu.Unlock()
 	if evalCtx.mappedPrincipal != nil && evalCtx.mappedPrincipalFor == p {
 		return *evalCtx.mappedPrincipal
 	}
