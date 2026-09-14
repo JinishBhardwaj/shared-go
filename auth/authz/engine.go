@@ -21,6 +21,50 @@ type EvaluationContext struct {
 	Resource Resource
 	Action   Action
 	Context  Context
+
+	// mappedPrincipal / mappedPrincipalFor cache the PARC-shaped Principal
+	// (the struct defined below, distinct from principal.Principal) mapped
+	// from the request's principal.Principal. Tier 2 "map the principal
+	// once" (gap-analysis-final.md line 106): PARCHandler.Handle and
+	// CustomRequirementHandler.Handle used to allocate a fresh Principal{...}
+	// (two allocations plus a map reference copy) on every single call, i.e.
+	// once per PARC/Custom requirement evaluated for a request rather than
+	// once per request. mapPARCPrincipal below computes the mapping at most
+	// once per EvaluationContext -- and a caller builds a fresh
+	// EvaluationContext per request (see auth/authz/gin/middleware.go and
+	// guard.go), so this is once per request in practice -- and every
+	// subsequent handler call sharing this context and principal reuses the
+	// cached value instead of rebuilding it. Deliberately unexported: the
+	// PARC-shaped Principal type and this cache are both authz-internal and
+	// are never constructed or read from outside the package.
+	mappedPrincipal    *Principal
+	mappedPrincipalFor *principal.Principal
+}
+
+// mapPARCPrincipal returns the PARC-shaped Principal for p against evalCtx,
+// computing it at most once per evalCtx (i.e. once per request, not once per
+// requirement/handler call -- see EvaluationContext.mappedPrincipal above).
+// The cache is keyed on p's pointer identity: PolicyEngine.Evaluate passes a
+// single *principal.Principal straight through to every handler for the
+// whole requirements loop, so a stale mapping never happens; the pointer
+// check is a defensive no-op today, not a workaround for an observed bug --
+// if evalCtx were ever reused across principals it would recompute rather
+// than silently return a mismatched cached copy.
+func mapPARCPrincipal(evalCtx *EvaluationContext, p *principal.Principal) Principal {
+	if evalCtx.mappedPrincipal != nil && evalCtx.mappedPrincipalFor == p {
+		return *evalCtx.mappedPrincipal
+	}
+	mapped := Principal{
+		ID:         p.Subject,
+		ClientID:   p.ClientID,
+		Roles:      p.Roles,
+		Scopes:     p.Scopes,
+		AuthMethod: string(p.Method),
+		Attributes: p.Metadata,
+	}
+	evalCtx.mappedPrincipal = &mapped
+	evalCtx.mappedPrincipalFor = p
+	return mapped
 }
 
 // RequirementHandler evaluates a specific requirement type, mirroring ASP.NET Core AuthorizationHandler<T>.
@@ -104,17 +148,10 @@ func (h *CustomRequirementHandler) Handle(ctx context.Context, p *principal.Prin
 	}
 
 	parcReq := Request{
-		Principal: Principal{
-			ID:         p.Subject,
-			ClientID:   p.ClientID,
-			Roles:      p.Roles,
-			Scopes:     p.Scopes,
-			AuthMethod: string(p.Method),
-			Attributes: p.Metadata,
-		},
-		Action:   evalCtx.Action,
-		Resource: evalCtx.Resource,
-		Context:  evalCtx.Context,
+		Principal: mapPARCPrincipal(evalCtx, p),
+		Action:    evalCtx.Action,
+		Resource:  evalCtx.Resource,
+		Context:   evalCtx.Context,
 	}
 
 	return cr.Func(ctx, parcReq), nil
@@ -207,17 +244,10 @@ func (h *PARCHandler) Handle(ctx context.Context, p *principal.Principal, req Re
 	}
 
 	pReq := Request{
-		Principal: Principal{
-			ID:         p.Subject,
-			ClientID:   p.ClientID,
-			Roles:      p.Roles,
-			Scopes:     p.Scopes,
-			AuthMethod: string(p.Method),
-			Attributes: p.Metadata,
-		},
-		Action:   action,
-		Resource: resource,
-		Context:  evalCtx.Context,
+		Principal: mapPARCPrincipal(evalCtx, p),
+		Action:    action,
+		Resource:  resource,
+		Context:   evalCtx.Context,
 	}
 
 	decision := perms.Evaluate(pReq)

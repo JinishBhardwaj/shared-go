@@ -272,3 +272,96 @@ func TestPARCHandler_CachingAndInstantRevocation(t *testing.T) {
 		t.Fatalf("expected permission check to be immediately denied after revocation, but was allowed!")
 	}
 }
+
+// TestMapPARCPrincipal_ComputedOnceAndReused is the G4 / Tier 2 "map the
+// principal once" regression test (gap-analysis-final.md line 106).
+// PARCHandler.Handle and CustomRequirementHandler.Handle used to allocate a
+// fresh PARC-shaped Principal{...} on every single call instead of once per
+// request; mapPARCPrincipal must compute it once per EvaluationContext and
+// reuse the cached value on every subsequent call against the same
+// evalCtx/principal pair, while still recomputing (never returning a stale
+// mapping) if the principal pointer genuinely changes.
+func TestMapPARCPrincipal_ComputedOnceAndReused(t *testing.T) {
+	p := &principal.Principal{
+		Subject:  "user-1",
+		ClientID: "client-1",
+		Roles:    []string{"admin"},
+		Scopes:   []string{"read"},
+		Method:   principal.AuthMethodClientCredentials,
+		Metadata: map[string]any{"tenant": "acme"},
+	}
+	evalCtx := &EvaluationContext{}
+
+	first := mapPARCPrincipal(evalCtx, p)
+	if first.ID != p.Subject || first.ClientID != p.ClientID || first.AuthMethod != string(p.Method) {
+		t.Fatalf("mapped fields mismatch: %+v", first)
+	}
+	if evalCtx.mappedPrincipal == nil {
+		t.Fatalf("expected evalCtx to cache the mapped Principal after the first call")
+	}
+	cached := evalCtx.mappedPrincipal
+
+	second := mapPARCPrincipal(evalCtx, p)
+	if evalCtx.mappedPrincipal != cached {
+		t.Errorf("second call against the same evalCtx/principal reallocated the mapped Principal instead of reusing the cache -- Tier 2 'map the principal once' regression")
+	}
+	if second.ID != first.ID || second.ClientID != first.ClientID || second.AuthMethod != first.AuthMethod {
+		t.Errorf("cached mapping differs from the original: got %+v, want %+v", second, first)
+	}
+
+	// A different principal pointer must recompute rather than return a
+	// stale cached mapping (defensive correctness, not the perf claim).
+	p2 := &principal.Principal{Subject: "user-2"}
+	third := mapPARCPrincipal(evalCtx, p2)
+	if third.ID != "user-2" {
+		t.Errorf("expected recompute for a different principal, got stale mapping %+v", third)
+	}
+}
+
+// TestPolicyEngine_StackedPARCAndCustomRequirement_MapsPrincipalOnce covers
+// the realistic stacking case the gap doc calls out: a policy combining
+// RequireAuthenticatedUser() (a CustomRequirement) with RequirePARC(...)
+// evaluates both a CustomRequirementHandler and a PARCHandler against the
+// same EvaluationContext for one request. Before this fix each handler
+// independently rebuilt the PARC-shaped Principal; now the second handler to
+// run must reuse the mapping the first one computed.
+func TestPolicyEngine_StackedPARCAndCustomRequirement_MapsPrincipalOnce(t *testing.T) {
+	ctx := context.Background()
+	memCache := memory.New[*PrincipalPermissions](0)
+	defer memCache.Dispose()
+
+	repo := NewMemoryPermissionRepository()
+	principalID := "user_stack"
+	_ = repo.GrantPermission(ctx, principalID, PermissionRule{
+		ActionPattern:     "read",
+		ResourceType:      "order",
+		ResourceIDPattern: "*",
+		Effect:            EffectPermit,
+	})
+
+	parcHandler, err := NewPARCHandler(PARCHandlerConfig{Repository: repo, Cache: memCache})
+	if err != nil {
+		t.Fatalf("failed to create PARCHandler: %v", err)
+	}
+
+	engine := NewPolicyEngine(parcHandler)
+	policy := NewPolicy("StackedReadOrder").RequireAuthenticatedUser().RequirePARC("read", "order").Build()
+	engine.RegisterPolicy(policy)
+
+	p := &principal.Principal{Subject: principalID}
+	evalCtx := &EvaluationContext{
+		Action:   Action{Name: "read"},
+		Resource: Resource{Type: "order", ID: "ord_1"},
+	}
+
+	d, err := engine.EvaluatePolicy(ctx, "StackedReadOrder", p, evalCtx)
+	if err != nil || !d.Allowed {
+		t.Fatalf("expected allowed, got allowed=%v err=%v", d.Allowed, err)
+	}
+	if evalCtx.mappedPrincipal == nil {
+		t.Fatalf("expected the mapped principal to be cached on evalCtx after evaluating a policy with both a CustomRequirement and a PARCRequirement")
+	}
+	if evalCtx.mappedPrincipalFor != p {
+		t.Errorf("cached mapping is not keyed to the evaluated principal")
+	}
+}
