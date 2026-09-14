@@ -104,6 +104,18 @@ func (r *PermissionRule) Matches(req Request) bool {
 type PrincipalPermissions struct {
 	PrincipalID string           `json:"principal_id"`
 	Rules       []PermissionRule `json:"rules"`
+
+	// FetchedAt records when this bundle was last fetched from the
+	// PermissionRepository. Populated by PARCHandler.Handle, not by
+	// PermissionRepository implementations themselves (MemoryPermissionRepository
+	// leaves it zero-valued; PARCHandler stamps it on every successful
+	// repository fetch). Used to distinguish a "fresh" cached bundle
+	// (within GrantTTL of FetchedAt) from a "stale" one (past GrantTTL but
+	// not yet evicted from the cache, whose hard TTL is PARCHandlerConfig.StaleTTL)
+	// for the Tier 3 stale-while-revalidate behavior -- see PARCHandler.Handle.
+	// Metadata only: never consulted by Matches/Evaluate, so it has no
+	// effect on authorization outcomes by itself.
+	FetchedAt time.Time `json:"fetched_at,omitempty"`
 }
 
 // Evaluate applies deny-overrides logic across all rules for this principal.

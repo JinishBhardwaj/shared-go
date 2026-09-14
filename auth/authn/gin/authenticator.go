@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"time"
 
 	"github.com/JinishBhardwaj/shared-go/auth/authn"
 	"github.com/JinishBhardwaj/shared-go/auth/principal"
@@ -34,11 +35,26 @@ type KeyValidator interface {
 	ValidateKey(ctx context.Context, rawKey string) (*principal.Principal, error)
 }
 
+// AuthEvent describes the outcome of one CompositeAuthenticator.Authenticate
+// call, reported to the optional OnAuthenticate hook
+// (CompositeAuthenticatorConfig.OnAuthenticate). Tier 4 audit-hook /
+// metrics-decorator support: built from an already-fully-computed
+// result -- see Authenticate's doc comment for why this cannot suppress or
+// change the returned Principal/error.
+type AuthEvent struct {
+	// CredentialType is "bearer", "apikey", or "" if no credential could be
+	// extracted at all.
+	CredentialType string
+	Success        bool
+	Duration       time.Duration
+}
+
 // CompositeAuthenticator combines Bearer JWT and API Key validation.
 type CompositeAuthenticator struct {
 	extractor       *CredentialExtractor
 	bearerValidator BearerTokenValidator
 	apiKeyValidator KeyValidator
+	onAuthenticate  func(context.Context, AuthEvent)
 }
 
 // SchemeHandler is an ASP.NET Core naming alias for CompositeAuthenticator.
@@ -62,6 +78,14 @@ type CompositeAuthenticatorConfig struct {
 
 	// APIKeyValidator validates incoming API keys.
 	APIKeyValidator KeyValidator
+
+	// OnAuthenticate, if set, is called once per Authenticate call with the
+	// already-fully-computed outcome (Tier 4 audit-hook / metrics-decorator
+	// support). Same no-suppression, no-recover contract as
+	// authz.PolicyEngine.SetOnDecision: fn receives a value describing a
+	// result that has already been returned to the caller, so it cannot
+	// change or suppress that result; fn must not block or panic.
+	OnAuthenticate func(context.Context, AuthEvent)
 }
 
 // NewCompositeAuthenticator creates an Authenticator supporting both JWTs/OIDC and API keys.
@@ -75,30 +99,48 @@ func NewCompositeAuthenticator(cfg CompositeAuthenticatorConfig) *CompositeAuthe
 		extractor:       NewCredentialExtractor(cfg.ExtractorConfig),
 		bearerValidator: bearerVal,
 		apiKeyValidator: cfg.APIKeyValidator,
+		onAuthenticate:  cfg.OnAuthenticate,
 	}
 }
 
 // Authenticate extracts the incoming credential and dispatches to the corresponding validator.
 func (a *CompositeAuthenticator) Authenticate(c *gin.Context) (*principal.Principal, error) {
+	start := time.Now()
+	p, credType, err := a.authenticate(c)
+	if a.onAuthenticate != nil {
+		a.onAuthenticate(c.Request.Context(), AuthEvent{
+			CredentialType: credType,
+			Success:        err == nil,
+			Duration:       time.Since(start),
+		})
+	}
+	return p, err
+}
+
+// authenticate does the actual extraction/dispatch; Authenticate wraps it to
+// time the call and report an AuthEvent without changing what it returns.
+func (a *CompositeAuthenticator) authenticate(c *gin.Context) (*principal.Principal, string, error) {
 	cred, err := a.extractor.Extract(c)
 	if err != nil {
-		return nil, err
+		return nil, "", err
 	}
 
 	switch cred.Type {
 	case CredentialTypeBearer:
 		if a.bearerValidator == nil {
-			return nil, fmt.Errorf("%w: bearer token validator not provided", ErrAuthenticatorNotConfigured)
+			return nil, "bearer", fmt.Errorf("%w: bearer token validator not provided", ErrAuthenticatorNotConfigured)
 		}
-		return a.bearerValidator.ValidateToken(c.Request.Context(), cred.Token)
+		p, err := a.bearerValidator.ValidateToken(c.Request.Context(), cred.Token)
+		return p, "bearer", err
 
 	case CredentialTypeAPIKey:
 		if a.apiKeyValidator == nil {
-			return nil, fmt.Errorf("%w: api key validator not provided", ErrAuthenticatorNotConfigured)
+			return nil, "apikey", fmt.Errorf("%w: api key validator not provided", ErrAuthenticatorNotConfigured)
 		}
-		return a.apiKeyValidator.ValidateKey(c.Request.Context(), cred.Token)
+		p, err := a.apiKeyValidator.ValidateKey(c.Request.Context(), cred.Token)
+		return p, "apikey", err
 
 	default:
-		return nil, ErrNoCredentialsFound
+		return nil, "", ErrNoCredentialsFound
 	}
 }

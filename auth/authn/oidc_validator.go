@@ -5,10 +5,13 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"sync"
+	"time"
 
 	"github.com/JinishBhardwaj/shared-go/auth/principal"
 	"github.com/coreos/go-oidc/v3/oidc"
 	"github.com/golang-jwt/jwt/v5"
+	"github.com/sony/gobreaker/v2"
 )
 
 var (
@@ -53,6 +56,26 @@ type OIDCValidatorConfig struct {
 
 	// CustomKeySetURL allows bypassing .well-known discovery and pointing directly to a JWKS URI. Optional.
 	CustomKeySetURL string
+
+	// DiscoveryTimeout bounds the OIDC discovery call
+	// (.well-known/openid-configuration) with a context deadline, in
+	// addition to whatever deadline the caller's own ctx already carries.
+	// Defaults to 5s. Deliberately NOT the gap analysis's ~50ms figure --
+	// that figure is stated for repo/Redis calls; a one-time HTTPS
+	// discovery round trip realistically needs more than 50ms, and using
+	// that value here would make every cold start spuriously trip the
+	// discovery breaker.
+	DiscoveryTimeout time.Duration
+
+	// VerifyTimeout bounds each ValidateToken call's underlying
+	// verifier.Verify (which may perform a JWKS fetch on an unknown kid)
+	// with a context deadline. Defaults to 2s -- same reasoning as
+	// DiscoveryTimeout: a real network round trip needs more than 50ms,
+	// and an unrealistically tight deadline here would fail legitimate
+	// requests under ordinary latency, which is itself a fail-open-shaped
+	// risk in the opposite direction (denying valid users, or -- worse --
+	// being loosened carelessly later to compensate).
+	VerifyTimeout time.Duration
 }
 
 // OIDCValidator uses github.com/coreos/go-oidc/v3 to perform dynamic OIDC discovery,
@@ -62,6 +85,41 @@ type OIDCValidator struct {
 	verifier         *oidc.IDTokenVerifier
 	normalizer       ClaimsNormalizer
 	allowedAudiences []string
+
+	// verifyBreaker and verifyTimeout guard ValidateToken's JWKS-fetching
+	// verifier.Verify call (Tier 3 "deadlines + breakers" for JWKS fetch).
+	// Not exposed as a public field -- only the time.Duration knob
+	// (OIDCValidatorConfig.VerifyTimeout) is public, same "don't leak the
+	// breaker library into the public API" reasoning used elsewhere in
+	// this gate.
+	verifyBreaker *gobreaker.CircuitBreaker[*oidc.IDToken]
+	verifyTimeout time.Duration
+}
+
+// discoveryBreakers is a package-level registry of one
+// *gobreaker.CircuitBreaker[*oidc.Provider] per unique issuer/key-set URL,
+// so that repeated NewOIDCValidator construction attempts against the same
+// unreachable IdP (e.g. an app retrying its own boot in a loop) fail fast
+// instead of hammering .well-known/openid-configuration on every attempt.
+// A single OIDCValidator's own construction is a one-time event, so the
+// breaker's value only shows up across repeated construction attempts --
+// which is exactly the scenario "breaker on OIDC discovery" is meant to
+// protect.
+var (
+	discoveryBreakersMu sync.Mutex
+	discoveryBreakers   = map[string]*gobreaker.CircuitBreaker[*oidc.Provider]{}
+)
+
+func discoveryBreakerFor(key string) *gobreaker.CircuitBreaker[*oidc.Provider] {
+	discoveryBreakersMu.Lock()
+	defer discoveryBreakersMu.Unlock()
+
+	if b, ok := discoveryBreakers[key]; ok {
+		return b
+	}
+	b := gobreaker.NewCircuitBreaker[*oidc.Provider](gobreaker.Settings{Name: "authn-oidc-discovery:" + key})
+	discoveryBreakers[key] = b
+	return b
 }
 
 // NewOIDCValidator initializes an OIDC discovery validator using coreos/go-oidc/v3.
@@ -102,16 +160,38 @@ func NewOIDCValidator(ctx context.Context, cfg OIDCValidatorConfig) (*OIDCValida
 		SkipClientIDCheck:    skipClientIDCheck,
 	}
 
+	discoveryTimeout := cfg.DiscoveryTimeout
+	if discoveryTimeout <= 0 {
+		discoveryTimeout = 5 * time.Second
+	}
+	verifyTimeout := cfg.VerifyTimeout
+	if verifyTimeout <= 0 {
+		verifyTimeout = 2 * time.Second
+	}
+
 	var verifier *oidc.IDTokenVerifier
 	var provider *oidc.Provider
 
 	if cfg.CustomKeySetURL != "" {
-		// Directly use remote JWKS key-set without full OIDC discovery
+		// Directly use remote JWKS key-set without full OIDC discovery.
+		// oidc.NewRemoteKeySet does no network I/O itself (it lazily
+		// fetches on first Verify), so there is no discovery call here to
+		// wrap with a breaker/deadline -- that cost is paid inside
+		// ValidateToken's verifyBreaker/verifyTimeout instead.
 		keySet := oidc.NewRemoteKeySet(ctx, cfg.CustomKeySetURL)
 		verifier = oidc.NewVerifier(cfg.IssuerURL, keySet, oidcConfig)
 	} else {
-		// Full dynamic OIDC discovery via .well-known/openid-configuration
-		p, err := oidc.NewProvider(ctx, cfg.IssuerURL)
+		// Full dynamic OIDC discovery via .well-known/openid-configuration.
+		// Tier 3 "breaker on OIDC discovery": bounded by DiscoveryTimeout
+		// and guarded by a per-issuer breaker so repeated construction
+		// attempts against a down IdP fail fast instead of hammering
+		// .well-known on every attempt.
+		breaker := discoveryBreakerFor(cfg.IssuerURL)
+		p, err := breaker.Execute(func() (*oidc.Provider, error) {
+			dctx, cancel := context.WithTimeout(ctx, discoveryTimeout)
+			defer cancel()
+			return oidc.NewProvider(dctx, cfg.IssuerURL)
+		})
 		if err != nil {
 			return nil, fmt.Errorf("%w: %v", ErrOIDCProviderInit, err)
 		}
@@ -129,12 +209,26 @@ func NewOIDCValidator(ctx context.Context, cfg OIDCValidatorConfig) (*OIDCValida
 		verifier:         verifier,
 		normalizer:       norm,
 		allowedAudiences: allowedAudiences,
+		verifyBreaker:    gobreaker.NewCircuitBreaker[*oidc.IDToken](gobreaker.Settings{Name: "authn-oidc-verify:" + cfg.IssuerURL}),
+		verifyTimeout:    verifyTimeout,
 	}, nil
 }
 
 // ValidateToken cryptographically verifies the token via dynamic JWKS and normalizes the claims.
+//
+// The underlying verifier.Verify call (which may perform a JWKS fetch on an
+// unknown kid) is guarded by a per-validator circuit breaker and bounded by
+// VerifyTimeout (Tier 3 "breaker on JWKS fetch"). A breaker-open or
+// deadline-exceeded error surfaces identically to any other verification
+// failure below -- wrapped in ErrInvalidToken -- so neither can ever be
+// mistaken for, or silently degrade into, an accepted token.
 func (v *OIDCValidator) ValidateToken(ctx context.Context, tokenStr string) (*principal.Principal, error) {
-	idToken, err := v.verifier.Verify(ctx, tokenStr)
+	vctx, cancel := context.WithTimeout(ctx, v.verifyTimeout)
+	defer cancel()
+
+	idToken, err := v.verifyBreaker.Execute(func() (*oidc.IDToken, error) {
+		return v.verifier.Verify(vctx, tokenStr)
+	})
 	if err != nil {
 		return nil, fmt.Errorf("%w: %v", ErrInvalidToken, err)
 	}

@@ -10,6 +10,8 @@ import (
 	"github.com/JinishBhardwaj/shared-go/auth/principal"
 	"github.com/JinishBhardwaj/shared-go/cache"
 	"github.com/JinishBhardwaj/shared-go/cache/memory"
+	"github.com/sony/gobreaker/v2"
+	"golang.org/x/sync/singleflight"
 )
 
 var (
@@ -176,6 +178,48 @@ func (h *CustomRequirementHandler) Handle(ctx context.Context, p *principal.Prin
 	return cr.Func(ctx, parcReq), nil
 }
 
+// CacheOutcome reports which branch PARCHandler.Handle's permission lookup
+// took on a given call: purely observational, reported via
+// PARCHandlerConfig.OnCacheOutcome for metrics/logging -- it never affects
+// which branch is taken (that would make instrumentation a security-relevant
+// change; this is the opposite, additive-only, by construction).
+type CacheOutcome int
+
+const (
+	// CacheHit: the cached bundle was found and within GrantTTL of its
+	// FetchedAt -- no repository call was made.
+	CacheHit CacheOutcome = iota
+	// CacheMiss: no cached bundle was found (or the cache errored) and no
+	// stale bundle was available either; the repository was queried
+	// synchronously and its result (success or failure) determines the
+	// outcome directly.
+	CacheMiss
+	// CacheRefreshed: the cached bundle was stale (or missing), a
+	// repository refresh was attempted, and it succeeded.
+	CacheRefreshed
+	// CacheStale: the cached bundle was stale, a repository refresh was
+	// attempted and failed (breaker open, deadline exceeded, or a genuine
+	// repository error), and the previously cached (stale) bundle was
+	// served instead -- the stale-while-revalidate path.
+	CacheStale
+)
+
+// String implements fmt.Stringer for use as a metrics/log label.
+func (o CacheOutcome) String() string {
+	switch o {
+	case CacheHit:
+		return "hit"
+	case CacheMiss:
+		return "miss"
+	case CacheRefreshed:
+		return "refreshed"
+	case CacheStale:
+		return "stale"
+	default:
+		return "unknown"
+	}
+}
+
 // PARCHandlerConfig configures the PARC authorization handler.
 type PARCHandlerConfig struct {
 	// Repository is the application database containing permission records.
@@ -191,15 +235,55 @@ type PARCHandlerConfig struct {
 	// plain miss reach Handle through the same branch.
 	Cache cache.Cache[*PrincipalPermissions]
 
-	// GrantTTL is the cache duration for permission bundles. Defaults to 60 seconds.
+	// GrantTTL is the soft-TTL freshness window for permission bundles:
+	// how long a cached bundle is used directly, with no repository call
+	// at all. Defaults to 60 seconds.
 	GrantTTL time.Duration
+
+	// StaleTTL is the hard TTL: the actual cache entry expiration passed to
+	// Cache.Set. Once GrantTTL has elapsed but before StaleTTL has, a
+	// cached bundle is "stale but present" -- Handle attempts a refresh and,
+	// if that refresh fails (repository error, deadline exceeded, or the
+	// internal circuit breaker is open), falls back to serving the stale
+	// bundle rather than failing the request (Tier 3 stale-while-revalidate).
+	// Once StaleTTL has elapsed the cache itself evicts the entry and no
+	// stale fallback is available -- a failed refresh at that point fails
+	// closed exactly as it always has. Defaults to 5 minutes, and is never
+	// allowed to be smaller than GrantTTL (a hard TTL shorter than the soft
+	// TTL would make "stale" unreachable).
+	StaleTTL time.Duration
+
+	// RepoTimeout bounds each individual repository fetch
+	// (repo.GetPermissions) with a context deadline, decoupled from the
+	// caller's own inbound context -- see Handle's refreshPermissions for
+	// why. Defaults to 50ms per the gap analysis's explicit figure for
+	// repo/Redis calls.
+	RepoTimeout time.Duration
+
+	// OnCacheOutcome, if set, is called once per Handle call reporting
+	// which branch the permission lookup took (see CacheOutcome). Purely
+	// observational -- see CacheOutcome's doc comment.
+	OnCacheOutcome func(CacheOutcome)
 }
 
 // PARCHandler evaluates PARCRequirement with high-performance caching (10k+ RPS).
 type PARCHandler struct {
-	repo     PermissionRepository
-	cache    cache.Cache[*PrincipalPermissions]
-	grantTTL time.Duration
+	repo           PermissionRepository
+	cache          cache.Cache[*PrincipalPermissions]
+	grantTTL       time.Duration
+	staleTTL       time.Duration
+	repoTimeout    time.Duration
+	onCacheOutcome func(CacheOutcome)
+
+	// breaker and group are internal (not exported in PARCHandlerConfig)
+	// deliberately: exposing *gobreaker.CircuitBreaker[T] in authz's public
+	// API would leak a third-party dependency's type into this package's
+	// surface for no real caller benefit this gate -- same "no new exported
+	// surface" discipline used for the PARC-shaped Principal type. breaker
+	// and group are constructed with fixed, undocumented-as-tunable
+	// defaults; only the time.Duration knobs above are exposed.
+	breaker *gobreaker.CircuitBreaker[*PrincipalPermissions]
+	group   singleflight.Group
 }
 
 // NewPARCHandler creates an initialized PARC handler with caching.
@@ -215,12 +299,84 @@ func NewPARCHandler(cfg PARCHandlerConfig) (*PARCHandler, error) {
 	if ttl <= 0 {
 		ttl = 60 * time.Second
 	}
+	staleTTL := cfg.StaleTTL
+	if staleTTL <= 0 {
+		staleTTL = 5 * time.Minute
+	}
+	if staleTTL < ttl {
+		// A hard TTL shorter than the soft TTL would make the stale window
+		// unreachable -- never silently accept a misconfiguration that
+		// defeats the feature.
+		staleTTL = ttl
+	}
+	repoTimeout := cfg.RepoTimeout
+	if repoTimeout <= 0 {
+		repoTimeout = 50 * time.Millisecond
+	}
 
 	return &PARCHandler{
-		repo:     cfg.Repository,
-		cache:    c,
-		grantTTL: ttl,
+		repo:           cfg.Repository,
+		cache:          c,
+		grantTTL:       ttl,
+		staleTTL:       staleTTL,
+		repoTimeout:    repoTimeout,
+		onCacheOutcome: cfg.OnCacheOutcome,
+		breaker:        gobreaker.NewCircuitBreaker[*PrincipalPermissions](gobreaker.Settings{Name: "authz-permission-repository"}),
 	}, nil
+}
+
+// reportCacheOutcome calls the configured OnCacheOutcome hook, if any. Never
+// called before the outcome it reports is already fully determined.
+func (h *PARCHandler) reportCacheOutcome(o CacheOutcome) {
+	if h.onCacheOutcome != nil {
+		h.onCacheOutcome(o)
+	}
+}
+
+// refreshPermissions fetches principalID's permission bundle from the
+// repository, protected by a per-PARCHandler circuit breaker and a
+// per-call context deadline (h.repoTimeout), and collapses concurrent
+// refreshes for the same principalID into a single repository call
+// (Tier 3 singleflight -- a cache miss/stale-refresh on a hot principal no
+// longer fans every concurrent caller out to the repository individually).
+//
+// Deliberately uses context.Background() (bounded by h.repoTimeout), NOT the
+// calling goroutine's own inbound ctx, as the base for the repository call:
+// singleflight.Group.Do shares ONE execution of the function across every
+// concurrent caller currently waiting on this principalID. If the repository
+// call were tied to whichever individual caller happened to be the one
+// selected to actually run it, that caller's own context being canceled
+// (e.g. an HTTP client disconnecting) would abort the fetch for every other
+// waiter too, even though their own requests are still live. This is a
+// deliberate, accepted trade-off (the fetch is bounded by RepoTimeout
+// regardless, so it cannot hang forever), not an oversight.
+//
+// On success, the bundle's FetchedAt is stamped and it is written back to
+// the cache with h.staleTTL (the hard TTL) as its expiration. On failure
+// (repository error, deadline exceeded, or the breaker is open -- all three
+// surface identically as an error here, on purpose: none of them may ever
+// be special-cased into treating the caller as authorized) the error is
+// returned and the cache is left untouched.
+func (h *PARCHandler) refreshPermissions(cacheKey, principalID string) (*PrincipalPermissions, error) {
+	v, err, _ := h.group.Do(principalID, func() (any, error) {
+		cctx, cancel := context.WithTimeout(context.Background(), h.repoTimeout)
+		defer cancel()
+
+		perms, err := h.breaker.Execute(func() (*PrincipalPermissions, error) {
+			return h.repo.GetPermissions(cctx, principalID)
+		})
+		if err != nil {
+			return nil, err
+		}
+
+		perms.FetchedAt = time.Now()
+		_ = h.cache.Set(context.Background(), cacheKey, perms, h.staleTTL)
+		return perms, nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	return v.(*PrincipalPermissions), nil
 }
 
 // Handle fetches the principal's permission bundle (from cache or DB) and evaluates the PARC request.
@@ -237,18 +393,40 @@ func (h *PARCHandler) Handle(ctx context.Context, p *principal.Principal, req Re
 	// cache failure, not a miss, and is deliberately NOT treated as fatal --
 	// it falls through to the repository exactly like a miss does, so a
 	// degraded cache does not take authorization down with it.
-	perms, found, _ := h.cache.Get(ctx, cacheKey)
+	perms, found, cacheErr := h.cache.Get(ctx, cacheKey)
+	haveCached := found && cacheErr == nil && perms != nil
 
-	// 2. Cache miss (or cache error): fetch from local database repository
-	if !found || perms == nil {
-		var err error
-		perms, err = h.repo.GetPermissions(ctx, p.Subject)
-		if err != nil {
+	fresh := haveCached && time.Since(perms.FetchedAt) <= h.grantTTL
+
+	if !fresh {
+		refreshed, err := h.refreshPermissions(cacheKey, p.Subject)
+		switch {
+		case err == nil:
+			perms = refreshed
+			h.reportCacheOutcome(CacheRefreshed)
+		case haveCached:
+			// Tier 3 stale-while-revalidate: the refresh failed (breaker
+			// open, deadline exceeded, or a genuine repository error), but
+			// a previously fetched bundle is still sitting in the cache
+			// (not yet past StaleTTL) -- serve it rather than failing the
+			// whole request. This can never become fail-open: an actively
+			// revoked principal has no bundle left to fall back to, because
+			// the existing instant-revocation contract deletes the cache
+			// entry outright (repo.RevokeAll + cache.Delete, together, by
+			// the caller) -- see TestPARCHandler_CachingAndInstantRevocation.
+			// A backend outage that coincides with an active revocation
+			// still resolves to !haveCached below, not to a stale allow.
+			h.reportCacheOutcome(CacheStale)
+			// perms already holds the stale cached value from step 1; reuse it.
+		default:
+			// No usable cached value at all (genuine miss, or the cached
+			// entry already aged past StaleTTL and was evicted): fail
+			// closed exactly as before this change.
+			h.reportCacheOutcome(CacheMiss)
 			return false, fmt.Errorf("authz: failed fetching permissions: %w", err)
 		}
-
-		// Store in cache with 60-second grant propagation window
-		_ = h.cache.Set(ctx, cacheKey, perms, h.grantTTL)
+	} else {
+		h.reportCacheOutcome(CacheHit)
 	}
 
 	// 3. Assemble full PARC request
@@ -309,6 +487,54 @@ type PolicyEngine struct {
 	handlers       map[string]RequirementHandler
 	defaultPolicy  *Policy
 	fallbackPolicy *Policy
+	onDecision     func(context.Context, DecisionEvent)
+}
+
+// DecisionEvent describes the outcome of one PolicyEngine.Evaluate /
+// EvaluatePolicy call, reported to the optional OnDecision hook (see
+// PolicyEngine.SetOnDecision). Tier 4 audit-hook / metrics-decorator
+// support: purely observational, built from an already-fully-computed
+// Decision -- nothing about handling this event can change or suppress the
+// Allowed/Reason values it describes.
+type DecisionEvent struct {
+	// PolicyName is the evaluated policy's name (empty if the policy
+	// itself was not found).
+	PolicyName string
+	Allowed    bool
+	Reason     string
+	// RequirementType is the RequirementType() of the requirement that
+	// caused a deny (empty if Allowed is true, or if the policy itself was
+	// not found before any requirement ran).
+	RequirementType string
+	// Duration is the wall-clock time spent in this Evaluate/EvaluatePolicy
+	// call, from entry to the point the Decision was finalized.
+	Duration time.Duration
+}
+
+// SetOnDecision registers fn to be called once per Evaluate/EvaluatePolicy
+// call, after the Decision has already been fully computed. fn must not
+// block or panic: it is called synchronously on the evaluating goroutine,
+// unguarded by recover() by design (mirrors Go stdlib callback-hook
+// convention; a panicking caller-supplied hook is the caller's bug to fix,
+// not something this package should paper over). Pass nil to disable.
+func (e *PolicyEngine) SetOnDecision(fn func(context.Context, DecisionEvent)) {
+	e.onDecision = fn
+}
+
+// emitDecision calls the configured OnDecision hook, if any, with an
+// already-finalized Decision -- see DecisionEvent's doc comment for why this
+// cannot influence the outcome it reports.
+func (e *PolicyEngine) emitDecision(ctx context.Context, policyName string, d Decision, reqType string, start time.Time) {
+	if e.onDecision == nil {
+		return
+	}
+	e.onDecision(ctx, DecisionEvent{
+		PolicyName:      policyName,
+		Allowed:         d.Allowed,
+		Reason:          d.Reason,
+		RequirementType: reqType,
+		Duration:        time.Since(start),
+	})
 }
 
 // AuthorizationService is an ASP.NET Core naming alias for PolicyEngine (IAuthorizationService).
@@ -443,17 +669,24 @@ func (e *PolicyEngine) Authorize(ctx context.Context, principal *principal.Princ
 
 // EvaluatePolicy evaluates a named policy against a Principal.
 func (e *PolicyEngine) EvaluatePolicy(ctx context.Context, policyName string, principal *principal.Principal, evalCtx *EvaluationContext) (Decision, error) {
+	start := time.Now()
 	policy, exists := e.policies[policyName]
 	if !exists {
-		return Decision{Allowed: false, Reason: fmt.Sprintf("policy '%s' not found", policyName)}, ErrPolicyNotFound
+		d := Decision{Allowed: false, Reason: fmt.Sprintf("policy '%s' not found", policyName)}
+		e.emitDecision(ctx, policyName, d, "", start)
+		return d, ErrPolicyNotFound
 	}
 	return e.Evaluate(ctx, policy, principal, evalCtx)
 }
 
 // Evaluate runs all requirements in a Policy against the Principal (AND logic).
 func (e *PolicyEngine) Evaluate(ctx context.Context, policy Policy, principal *principal.Principal, evalCtx *EvaluationContext) (Decision, error) {
+	start := time.Now()
+
 	if principal == nil {
-		return Decision{Allowed: false, Reason: "principal is nil"}, ErrNilPrincipal
+		d := Decision{Allowed: false, Reason: "principal is nil"}
+		e.emitDecision(ctx, policy.Name, d, "", start)
+		return d, ErrNilPrincipal
 	}
 
 	if evalCtx == nil {
@@ -464,23 +697,31 @@ func (e *PolicyEngine) Evaluate(ctx context.Context, policy Policy, principal *p
 		reqType := req.RequirementType()
 		handler, exists := e.handlers[reqType]
 		if !exists {
-			return Decision{
+			d := Decision{
 				Allowed: false,
 				Reason:  fmt.Sprintf("no handler registered for requirement type '%s'", reqType),
-			}, nil
+			}
+			e.emitDecision(ctx, policy.Name, d, reqType, start)
+			return d, nil
 		}
 
 		allowed, err := handler.Handle(ctx, principal, req, evalCtx)
 		if err != nil {
-			return Decision{Allowed: false, Reason: err.Error()}, err
+			d := Decision{Allowed: false, Reason: err.Error()}
+			e.emitDecision(ctx, policy.Name, d, reqType, start)
+			return d, err
 		}
 		if !allowed {
-			return Decision{
+			d := Decision{
 				Allowed: false,
 				Reason:  fmt.Sprintf("requirement '%s' failed", reqType),
-			}, nil
+			}
+			e.emitDecision(ctx, policy.Name, d, reqType, start)
+			return d, nil
 		}
 	}
 
-	return Decision{Allowed: true}, nil
+	d := Decision{Allowed: true}
+	e.emitDecision(ctx, policy.Name, d, "", start)
+	return d, nil
 }
