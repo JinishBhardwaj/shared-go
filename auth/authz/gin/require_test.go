@@ -51,7 +51,7 @@ func TestGinGuard_RequirePolicyAndPARC(t *testing.T) {
 
 	// Protected route using RequirePARC with route param extraction
 	r.GET("/reports/:reportId",
-		RequirePARC(engine, "read", "report", ExtractResourceFromParam("reportId", "report")),
+		Require(WithEngine(engine), WithPARC("read", "report"), WithResource(ExtractResourceFromParam("reportId", "report"))),
 		func(c *gin.Context) {
 			c.JSON(http.StatusOK, gin.H{"status": "ok", "report": c.Param("reportId")})
 		},
@@ -124,7 +124,7 @@ func TestRequirePARC_NeverLeaksRawInternalErrorText(t *testing.T) {
 		c.Next()
 	})
 	r.GET("/reports/:reportId",
-		RequirePARC(engine, "read", "report", ExtractResourceFromParam("reportId", "report")),
+		Require(WithEngine(engine), WithPARC("read", "report"), WithResource(ExtractResourceFromParam("reportId", "report"))),
 		func(c *gin.Context) {
 			c.JSON(http.StatusOK, gin.H{"status": "ok"})
 		},

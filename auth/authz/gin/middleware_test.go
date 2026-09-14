@@ -47,8 +47,19 @@ func TestUseAuthorizationMiddleware(t *testing.T) {
 		WithFallbackPolicy(authz.NewPolicy("Fallback").RequireUser().Build()),
 	))
 
-	// Routes
-	r.GET("/public", AllowAnonymous(), func(c *gin.Context) {
+	// Routes. /public and /admin are registered through Group/ProtectGroup
+	// (G6, gap-analysis-final.md Tier 1 line 97 / Tier 4 line 131): this is
+	// the explicit, registration-time metadata mechanism that replaces the
+	// former HandlerNames() string-sniffing hack, and it is what New()'s
+	// FallbackPolicy enforcement now consults to recognize "this route
+	// already has an explicit authorization annotation" -- for /admin, this
+	// gives the intended ASP.NET Core-style semantics of
+	// [Authorize(Policy="AdminPolicy")] overriding, not stacking with, the
+	// global default policy. /profile is deliberately left on the raw
+	// router, unmarked, to prove FallbackPolicy still applies to any route
+	// that does not opt in via Group.
+	public := Group(&r.RouterGroup)
+	public.GET("/public", AllowAnonymous(), func(c *gin.Context) {
 		c.JSON(http.StatusOK, gin.H{"status": "public"})
 	})
 
@@ -56,7 +67,8 @@ func TestUseAuthorizationMiddleware(t *testing.T) {
 		c.JSON(http.StatusOK, gin.H{"status": "profile"})
 	})
 
-	r.GET("/admin", Authorize("AdminPolicy"), func(c *gin.Context) {
+	admin := ProtectGroup(r.Group(""), "AdminPolicy", WithEngine(engine))
+	admin.GET("/admin", func(c *gin.Context) {
 		c.JSON(http.StatusOK, gin.H{"status": "admin"})
 	})
 

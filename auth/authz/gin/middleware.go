@@ -3,7 +3,6 @@ package gin
 import (
 	"fmt"
 	"net/http"
-	"strings"
 	"time"
 
 	"github.com/JinishBhardwaj/shared-go/auth/authz"
@@ -78,22 +77,14 @@ func New(service *authz.PolicyEngine, opts ...MiddlewareOption) gin.HandlerFunc 
 		c.Set(ContextKeyAuthorizationService, service)
 
 		// 2. FallbackPolicy enforcement (Zero-Trust)
-		// If a FallbackPolicy is configured, check if this route has an explicit Authorize or AllowAnonymous handler
+		// If a FallbackPolicy is configured, check if this route was
+		// registered through Group/ProtectGroup (routes.go) -- explicit,
+		// registration-time route metadata that replaces the former
+		// HandlerNames() substring scan (gap-analysis-final.md Tier 1
+		// line 97).
 		if cfg.fallbackPolicy != nil {
-			hasExplicitAuth := false
-			for _, name := range c.HandlerNames() {
-				if strings.Contains(name, "AllowAnonymous") ||
-					strings.Contains(name, "Authorize") ||
-					strings.Contains(name, "WithPolicy") ||
-					strings.Contains(name, "RequirePolicy") ||
-					strings.Contains(name, "RequirePARC") {
-					hasExplicitAuth = true
-					break
-				}
-			}
-
 			// If the route has NO explicit authorization annotation, evaluate FallbackPolicy BEFORE executing handler
-			if !hasExplicitAuth {
+			if !hasExplicitAuthAnnotation(c) {
 				user := ginprincipal.User(c)
 				if user == nil {
 					handleResult(c, authz.FailedResult("Authentication required"), cfg.fallbackPolicy.Name, cfg.resultHandler)
@@ -132,7 +123,18 @@ func New(service *authz.PolicyEngine, opts ...MiddlewareOption) gin.HandlerFunc 
 	}
 }
 
-// AllowAnonymous marks an endpoint as exempt from all authorization checks (mirrors ASP.NET Core [AllowAnonymous]).
+// AllowAnonymous marks an endpoint as exempt from all authorization checks
+// (mirrors ASP.NET Core [AllowAnonymous]). New()'s FallbackPolicy
+// enforcement recognizes a route as exempt only when it was registered
+// through Group/ProtectGroup (routes.go) -- attaching AllowAnonymous()
+// directly to a route on the raw router still marks that request (via
+// ContextKeyAllowAnonymous, below) but does NOT by itself skip
+// FallbackPolicy; use Group(rg) to register genuinely anonymous routes so
+// FallbackPolicy recognizes them. AllowAnonymous() also sets
+// ContextKeyAllowAnonymous on the gin context, which AuthorizeResource below
+// genuinely reads back (G6: "make AllowAnonymous real" --
+// gap-analysis-final.md Tier 1 line 96) -- see .claude/authfix/state.md's
+// G6 note for the fail-open analysis of this context-key read.
 func AllowAnonymous() gin.HandlerFunc {
 	return func(c *gin.Context) {
 		c.Set(ContextKeyAllowAnonymous, true)
@@ -140,78 +142,16 @@ func AllowAnonymous() gin.HandlerFunc {
 	}
 }
 
-// Authorize enforces a named authorization policy on an endpoint (mirrors ASP.NET Core [Authorize(Policy = "...")]).
-// Can be used either:
-// 1. In a pipeline configured with UseAuthorization: Authorize("AdminPolicy")
-// 2. Standalone with direct engine: Authorize("AdminPolicy", engine)
-func Authorize(policyName string, args ...any) gin.HandlerFunc {
-	var engine *authz.PolicyEngine
-	var extractor ResourceExtractorFunc
-
-	for _, arg := range args {
-		switch v := arg.(type) {
-		case *authz.PolicyEngine:
-			engine = v
-		case ResourceExtractorFunc:
-			extractor = v
-		}
-	}
-
-	return func(c *gin.Context) {
-		srv := engine
-		if srv == nil {
-			if sVal, exists := c.Get(ContextKeyAuthorizationService); exists {
-				if s, ok := sVal.(*authz.PolicyEngine); ok {
-					srv = s
-				}
-			}
-		}
-		if srv == nil {
-			panic("authz: no PolicyEngine provided to Authorize or found in context via UseAuthorization")
-		}
-
-		user := ginprincipal.User(c)
-		if user == nil {
-			handleResult(c, authz.FailedResult("Authentication required"), policyName, nil)
-			c.Abort()
-			return
-		}
-
-		var res authz.Resource
-		if extractor != nil {
-			res = extractor(c)
-		}
-
-		evalCtx := &authz.EvaluationContext{
-			Action: authz.Action{
-				Name:       c.Request.Method,
-				HTTPMethod: c.Request.Method,
-			},
-			Resource: res,
-			Context: authz.Context{
-				ClientIP:  c.ClientIP(),
-				Timestamp: time.Now().UTC(),
-			},
-		}
-
-		result, err := srv.Authorize(c.Request.Context(), user, policyName, evalCtx)
-		if err != nil || !result.Succeeded {
-			handleResult(c, result, policyName, nil)
-			c.Abort()
-			return
-		}
-
-		c.Next()
-	}
-}
-
-// WithPolicy is a declarative alias for Authorize(policyName, ...).
-func WithPolicy(policyName string, args ...any) gin.HandlerFunc {
-	return Authorize(policyName, args...)
-}
-
 // AuthorizeResource provides imperative authorization inside request handlers (mirrors _authService.AuthorizeAsync).
+// If the route was marked AllowAnonymous() earlier in this same request's
+// handler chain, this short-circuits to a successful result -- the only
+// place in this package where ContextKeyAllowAnonymous is genuinely
+// consulted (G6, Tier 1 line 96).
 func AuthorizeResource(c *gin.Context, resource authz.Resource, policyName string) authz.AuthorizationResult {
+	if anon, exists := c.Get(ContextKeyAllowAnonymous); exists && anon == true {
+		return authz.SuccessResult()
+	}
+
 	serviceVal, exists := c.Get(ContextKeyAuthorizationService)
 	if !exists {
 		return authz.FailedResult("authz: authorization service not found in context")

@@ -36,7 +36,7 @@ func TestAuthorizationBuilder(t *testing.T) {
 	})
 	r.Use(middleware)
 
-	r.GET("/admin", Authorize("AdminOnly"), func(c *gin.Context) {
+	r.GET("/admin", Require(WithPolicyName("AdminOnly")), func(c *gin.Context) {
 		c.String(http.StatusOK, "admin granted")
 	})
 
@@ -74,7 +74,7 @@ func TestAuthorizationBuilderForbidden(t *testing.T) {
 	})
 	r.Use(middleware)
 
-	r.GET("/admin", Authorize("AdminOnly"), func(c *gin.Context) {
+	r.GET("/admin", Require(WithPolicyName("AdminOnly")), func(c *gin.Context) {
 		c.String(http.StatusOK, "admin granted")
 	})
 
