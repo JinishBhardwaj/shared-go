@@ -2,7 +2,6 @@ package gin
 
 import (
 	"fmt"
-	"net/http"
 	"strings"
 	"time"
 
@@ -323,11 +322,8 @@ func requirePolicyGuard(c *gin.Context, cfg *requireConfig) {
 		// exists to accompany a 401 challenge, which this package no longer
 		// issues; see httpsec.go).
 		logAuthzDenial(fmt.Sprintf("policy %q", cfg.policyName), "no principal in context")
-		c.AbortWithStatusJSON(http.StatusForbidden, gin.H{
-			"error":             "forbidden",
-			"error_description": descAuthenticationRequired,
-			"policy":            cfg.policyName,
-		})
+		writeForbiddenProblem(c, "forbidden", descAuthenticationRequired, map[string]any{"policy": cfg.policyName})
+		c.Abort()
 		return
 	}
 
@@ -359,13 +355,11 @@ func requirePolicyGuard(c *gin.Context, cfg *requireConfig) {
 	if err != nil || !decision.Allowed {
 		logAuthzDenial(fmt.Sprintf("policy %q", cfg.policyName), decision.Reason)
 
-		c.Header("WWW-Authenticate", fmt.Sprintf("Bearer error=%s, error_description=%s",
-			quoteRFC7235(rfc6750InsufficientScope), quoteRFC7235(descAccessDeniedByPolicy)))
-		c.AbortWithStatusJSON(http.StatusForbidden, gin.H{
-			"error":             "forbidden",
-			"error_description": descAccessDeniedByPolicy,
-			"policy":            cfg.policyName,
-		})
+		// No WWW-Authenticate: rfc6750InsufficientScope is an OAuth *scope*
+		// error code, and this is a generic policy denial, not a scope
+		// shortfall -- see requireScopeGuard for the legitimate use.
+		writeForbiddenProblem(c, "forbidden", descAccessDeniedByPolicy, map[string]any{"policy": cfg.policyName})
+		c.Abort()
 		return
 	}
 
@@ -386,12 +380,11 @@ func requirePARCGuard(c *gin.Context, cfg *requireConfig, inlinePolicy authz.Pol
 		// authz never emits 401 -- same reasoning as requirePolicyGuard
 		// above (gap-analysis-final.md Tier 2 line 107, G8-5).
 		logAuthzDenial(fmt.Sprintf("PARC action=%q resource_type=%q", cfg.parcAction, cfg.parcResource), "no principal in context")
-		c.AbortWithStatusJSON(http.StatusForbidden, gin.H{
-			"error":             "forbidden",
-			"error_description": descAuthenticationRequired,
-			"action":            cfg.parcAction,
-			"resource_type":     cfg.parcResource,
+		writeForbiddenProblem(c, "forbidden", descAuthenticationRequired, map[string]any{
+			"action":        cfg.parcAction,
+			"resource_type": cfg.parcResource,
 		})
+		c.Abort()
 		return
 	}
 
@@ -422,15 +415,15 @@ func requirePARCGuard(c *gin.Context, cfg *requireConfig, inlinePolicy authz.Pol
 	if err != nil || !decision.Allowed {
 		logAuthzDenial(fmt.Sprintf("PARC action=%q resource_type=%q", cfg.parcAction, cfg.parcResource), decision.Reason)
 
+		// No WWW-Authenticate: rfc6750InsufficientScope is an OAuth *scope*
+		// error code, and this is a PARC permission denial, not a scope
+		// shortfall -- see requireScopeGuard for the legitimate use.
 		safeDesc := fmt.Sprintf("Missing permission for action '%s' on resource '%s'", cfg.parcAction, cfg.parcResource)
-		c.Header("WWW-Authenticate", fmt.Sprintf("Bearer error=%s, error_description=%s",
-			quoteRFC7235(rfc6750InsufficientScope), quoteRFC7235(safeDesc)))
-		c.AbortWithStatusJSON(http.StatusForbidden, gin.H{
-			"error":             "insufficient_permissions",
-			"error_description": safeDesc,
-			"action":            cfg.parcAction,
-			"resource_type":     cfg.parcResource,
+		writeForbiddenProblem(c, "insufficient_permissions", safeDesc, map[string]any{
+			"action":        cfg.parcAction,
+			"resource_type": cfg.parcResource,
 		})
+		c.Abort()
 		return
 	}
 
@@ -456,17 +449,13 @@ func requireScopeGuard(c *gin.Context, scopes []string, all bool) {
 		c.Header("WWW-Authenticate", fmt.Sprintf("Bearer error=%s, scope=%s",
 			quoteRFC7235(rfc6750InsufficientScope), quoteRFC7235(strings.Join(scopes, " "))))
 		if all {
-			c.AbortWithStatusJSON(http.StatusForbidden, gin.H{
-				"error":             "insufficient_scope",
-				"error_description": fmt.Sprintf("Requires all of the following scopes: %s", strings.Join(scopes, ", ")),
-				"missing_scopes":    missingScopes(user, scopes),
-			})
+			desc := fmt.Sprintf("Requires all of the following scopes: %s", strings.Join(scopes, ", "))
+			writeForbiddenProblem(c, "insufficient_scope", desc, map[string]any{"missing_scopes": missingScopes(user, scopes)})
 		} else {
-			c.AbortWithStatusJSON(http.StatusForbidden, gin.H{
-				"error":             "insufficient_scope",
-				"error_description": fmt.Sprintf("Requires at least one of the following scopes: %s", strings.Join(scopes, ", ")),
-			})
+			desc := fmt.Sprintf("Requires at least one of the following scopes: %s", strings.Join(scopes, ", "))
+			writeForbiddenProblem(c, "insufficient_scope", desc, nil)
 		}
+		c.Abort()
 		return
 	}
 
@@ -487,16 +476,13 @@ func requireRoleGuard(c *gin.Context, roles []string, all bool) {
 	allowed, _ := roleHandler.Handle(c.Request.Context(), user, req, nil)
 	if !allowed {
 		if all {
-			c.AbortWithStatusJSON(http.StatusForbidden, gin.H{
-				"error":             "insufficient_role",
-				"error_description": fmt.Sprintf("Missing required role: %s", firstMissingRole(user, roles)),
-			})
+			desc := fmt.Sprintf("Missing required role: %s", firstMissingRole(user, roles))
+			writeForbiddenProblem(c, "insufficient_role", desc, nil)
 		} else {
-			c.AbortWithStatusJSON(http.StatusForbidden, gin.H{
-				"error":             "insufficient_role",
-				"error_description": fmt.Sprintf("Requires at least one of the following roles: %s", strings.Join(roles, ", ")),
-			})
+			desc := fmt.Sprintf("Requires at least one of the following roles: %s", strings.Join(roles, ", "))
+			writeForbiddenProblem(c, "insufficient_role", desc, nil)
 		}
+		c.Abort()
 		return
 	}
 
@@ -520,11 +506,9 @@ func requireMethodGuard(c *gin.Context, methods []principal.AuthMethod) {
 		for i, m := range methods {
 			methodNames[i] = string(m)
 		}
-		c.AbortWithStatusJSON(http.StatusForbidden, gin.H{
-			"error":             "disallowed_auth_flow",
-			"error_description": fmt.Sprintf("This endpoint requires authentication via [%s], but received [%s]", strings.Join(methodNames, ", "), user.Method),
-			"current_method":    user.Method,
-		})
+		desc := fmt.Sprintf("This endpoint requires authentication via [%s], but received [%s]", strings.Join(methodNames, ", "), user.Method)
+		writeForbiddenProblem(c, "disallowed_auth_flow", desc, map[string]any{"current_method": user.Method})
+		c.Abort()
 		return
 	}
 
@@ -540,10 +524,8 @@ func requireMethodGuard(c *gin.Context, methods []principal.AuthMethod) {
 // respondUnauthenticated and returned 401; renamed alongside the behavior
 // change so the name matches what it actually does.
 func respondNoPrincipalForbidden(c *gin.Context) {
-	c.AbortWithStatusJSON(http.StatusForbidden, gin.H{
-		"error":             "forbidden",
-		"error_description": descAuthenticationRequired,
-	})
+	writeForbiddenProblem(c, "forbidden", descAuthenticationRequired, nil)
+	c.Abort()
 }
 
 func missingScopes(p *principal.Principal, required []string) []string {

@@ -8,6 +8,7 @@ import (
 	"github.com/JinishBhardwaj/shared-go/auth/authz"
 	ginprincipal "github.com/JinishBhardwaj/shared-go/auth/principal/gin"
 	"github.com/gin-gonic/gin"
+	"github.com/tucowsinc/tdp-shared-go/problem"
 )
 
 const (
@@ -216,19 +217,37 @@ func handleResult(c *gin.Context, result authz.AuthorizationResult, policyName s
 
 	if !result.Succeeded && result.FailureReason == descAuthenticationRequired {
 		logAuthzDenial("request", result.FailureReason)
-		c.JSON(http.StatusForbidden, gin.H{
-			"error":             "forbidden",
-			"error_description": descAuthenticationRequired,
-		})
+		writeForbiddenProblem(c, "forbidden", descAuthenticationRequired, nil)
 		return
 	}
 
+	// No WWW-Authenticate here: rfc6750InsufficientScope is an RFC 6750
+	// OAuth *scope* error code, and this is a generic policy denial, not a
+	// scope shortfall -- see requireScopeGuard for the one path that
+	// legitimately uses it.
 	logAuthzDenial(fmt.Sprintf("policy %q", policyName), result.FailureReason)
-	c.Header("WWW-Authenticate", fmt.Sprintf("Bearer error=%s, error_description=%s",
-		quoteRFC7235(rfc6750InsufficientScope), quoteRFC7235(descAccessDeniedByPolicy)))
-	c.JSON(http.StatusForbidden, gin.H{
-		"error":             "forbidden",
-		"error_description": descAccessDeniedByPolicy,
-		"policy":            policyName,
-	})
+	writeForbiddenProblem(c, "forbidden", descAccessDeniedByPolicy, map[string]any{"policy": policyName})
+}
+
+// writeForbiddenProblem writes an RFC 9457 Problem Details 403 response.
+// The legacy "error"/"error_description" OAuth-style fields (and any
+// mode-specific fields in extra, e.g. "policy"/"missing_scopes") are carried
+// as RFC 9457 section 3.2 extension members so existing clients parsing
+// those keys keep working, while the response now also carries the
+// registered type/title/status/instance members and the
+// application/problem+json media type (WriteTo). Tier 0 #7: errCode/desc
+// passed in here are always fixed literals or route-wiring constants, never
+// raw error text -- callers are responsible for that, same as before.
+func writeForbiddenProblem(c *gin.Context, errCode, desc string, extra map[string]any) {
+	ext := map[string]any{"error": errCode, "error_description": desc}
+	for k, v := range extra {
+		ext[k] = v
+	}
+	problem.Details{
+		Status:     http.StatusForbidden,
+		Title:      http.StatusText(http.StatusForbidden),
+		Detail:     desc,
+		Instance:   c.Request.URL.Path,
+		Extensions: ext,
+	}.WriteTo(c.Writer)
 }

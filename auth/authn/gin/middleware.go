@@ -12,6 +12,7 @@ import (
 	"github.com/JinishBhardwaj/shared-go/auth/principal"
 	ginprincipal "github.com/JinishBhardwaj/shared-go/auth/principal/gin"
 	"github.com/gin-gonic/gin"
+	"github.com/tucowsinc/tdp-shared-go/problem"
 )
 
 const (
@@ -178,10 +179,19 @@ func handleAuthError(c *gin.Context, err error, cfg MiddlewareConfig) {
 		return
 	}
 
-	c.JSON(status, gin.H{
-		"error":             errCode,
-		"error_description": errDesc,
-	})
+	// RFC 9457 Problem Details body, with the legacy RFC 6750 error/
+	// error_description keys carried as extension members (RFC 9457
+	// section 3.2) so existing clients parsing those keys keep working.
+	problem.Details{
+		Status:   status,
+		Title:    http.StatusText(status),
+		Detail:   errDesc,
+		Instance: c.Request.URL.Path,
+		Extensions: map[string]any{
+			"error":             errCode,
+			"error_description": errDesc,
+		},
+	}.WriteTo(c.Writer)
 }
 
 // logAuthFailure records the real, unsanitized authentication error

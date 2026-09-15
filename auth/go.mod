@@ -9,10 +9,13 @@ require (
 	github.com/golang-jwt/jwt/v5 v5.2.1
 	github.com/jackc/pgx/v5 v5.7.1
 	github.com/sony/gobreaker/v2 v2.4.0
+	github.com/tucowsinc/tdp-shared-go/problem v0.0.0
 	golang.org/x/sync v0.8.0
 )
 
 replace github.com/JinishBhardwaj/shared-go => ../
+
+replace github.com/tucowsinc/tdp-shared-go/problem => ../problem
 
 require (
 	github.com/bytedance/sonic v1.9.1 // indirect

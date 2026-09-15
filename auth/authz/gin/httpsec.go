@@ -11,13 +11,17 @@ import (
 // all (G8-5, gap-analysis-final.md Tier 2 line 107: "authz emits 403 only
 // ... Challenges are authn's job") -- a missing principal in context is
 // answered with 403 like any other authorization failure, not a
-// WWW-Authenticate challenge. Only "insufficient_scope" remains, used as the
-// auth-param value on the insufficient-scope/insufficient-permission 403
-// paths below. (The former "unauthorized" auth-param value, this package's
-// own non-RFC convention for "no authenticated principal is present", was
-// removed with the 401 code paths that used it -- see require.go's
-// requirePolicyGuard/requirePARCGuard/respondNoPrincipalForbidden and
-// middleware.go's handleResult.)
+// WWW-Authenticate challenge. Only "insufficient_scope" remains, and it is
+// an OAuth *scope* error code (RFC 6750 §3.1) -- it is written into the
+// WWW-Authenticate header solely by require.go's requireScopeGuard, which
+// checks an actual scope requirement. Policy/PARC denials (handleResult's
+// policy-fail path, requirePolicyGuard, requirePARCGuard) are not scope
+// shortfalls, so they answer 403 with a Problem Details body only, no
+// WWW-Authenticate header. (The former "unauthorized" auth-param value,
+// this package's own non-RFC convention for "no authenticated principal is
+// present", was removed with the 401 code paths that used it -- see
+// require.go's requirePolicyGuard/requirePARCGuard/
+// respondNoPrincipalForbidden and middleware.go's handleResult.)
 //
 // Tier 0 #7: the built-in response writers in this package
 // (middleware.go's handleResult, require.go's requirePolicyGuard/
