@@ -29,6 +29,8 @@ type MiddlewareConfig struct {
 	realm             string
 	errorHandler      ErrorHandler
 	claimsTransformer principal.ClaimsTransformer
+	idTokenHeader     string
+	idTokenEnricher   *authn.IDTokenGroupsEnricher
 }
 
 // Option configures the middleware.
@@ -72,6 +74,19 @@ func WithClaimsTransformation(transformation principal.ClaimsTransformation) Opt
 	return WithClaimsTransformer(transformation)
 }
 
+// WithIDTokenGroupsEnrichment registers an authn.IDTokenGroupsEnricher and
+// the request header it should read a second, non-bearer ID token from (e.g.
+// "X-Id-Token"). Runs once, right after successful authentication and before
+// any configured ClaimsTransformer, so a database-backed transformer sees the
+// enriched roles too. The header's token is never treated as a credential --
+// see IDTokenGroupsEnricher's doc comment.
+func WithIDTokenGroupsEnrichment(headerName string, enricher *authn.IDTokenGroupsEnricher) Option {
+	return func(cfg *MiddlewareConfig) {
+		cfg.idTokenHeader = headerName
+		cfg.idTokenEnricher = enricher
+	}
+}
+
 // UseAuthentication creates a Gin authentication middleware (mirrors ASP.NET Core app.UseAuthentication()).
 func UseAuthentication(authenticator Authenticator, opts ...Option) gin.HandlerFunc {
 	return New(authenticator, opts...)
@@ -97,6 +112,14 @@ func New(authenticator Authenticator, opts ...Option) gin.HandlerFunc {
 			handleAuthError(c, err, cfg)
 			c.Abort()
 			return
+		}
+
+		// ID token supplemental groups enrichment (see WithIDTokenGroupsEnrichment),
+		// before ClaimsTransformer so a DB-backed transformer sees enriched roles too.
+		if cfg.idTokenEnricher != nil && cfg.idTokenHeader != "" {
+			if idTok := c.GetHeader(cfg.idTokenHeader); idTok != "" {
+				p = cfg.idTokenEnricher.Enrich(c.Request.Context(), idTok, p)
+			}
 		}
 
 		// Run ClaimsTransformer (ASP.NET Core IClaimsTransformation) if configured

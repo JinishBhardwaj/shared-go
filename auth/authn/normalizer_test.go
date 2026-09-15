@@ -100,3 +100,58 @@ func TestCognitoClaimsNormalizer_TokenUseEnforcement(t *testing.T) {
 		}
 	})
 }
+
+// TestCognitoClaimsNormalizer_CustomGroupsAttribute covers a Cognito custom
+// attribute mapped from a SAML IdP's multi-valued "groups" attribute.
+// Cognito always stringifies custom attributes, so a multi-valued source
+// attribute lands as a bracketed, comma-separated STRING ("[a, b]"), never a
+// real JSON array -- distinct from the native "cognito:groups" claim.
+func TestCognitoClaimsNormalizer_CustomGroupsAttribute(t *testing.T) {
+	norm := NewCognitoClaimsNormalizer(WithCustomGroupsAttribute("custom:groups"))
+
+	claims := jwt.MapClaims{
+		"sub":            "cognito-usr-777",
+		"token_use":      "access",
+		"cognito:groups": []any{"grafana-stg-users"},
+		"custom:groups":  "[domains-tcc-access, domains-iuxp-access]",
+	}
+
+	id, err := norm.Normalize(claims, "dummy.raw.token")
+	if err != nil {
+		t.Fatalf("failed to normalize: %v", err)
+	}
+
+	for _, want := range []string{"grafana-stg-users", "domains-tcc-access", "domains-iuxp-access"} {
+		if !id.HasRole(want) {
+			t.Errorf("expected role %q, got roles: %v", want, id.Roles)
+		}
+	}
+}
+
+// TestCognitoClaimsNormalizer_ExcludeIdPAssociationGroups covers Cognito's
+// synthetic "<userPoolID>_<providerName>" pseudo-group, auto-injected into
+// cognito:groups to record IdP linkage rather than an assigned role.
+func TestCognitoClaimsNormalizer_ExcludeIdPAssociationGroups(t *testing.T) {
+	norm := NewCognitoClaimsNormalizer(WithGroupFilter(ExcludeIdPAssociationGroups("us-east-1_DNMvWNMWv")))
+
+	claims := jwt.MapClaims{
+		"sub":       "cognito-usr-777",
+		"token_use": "access",
+		"cognito:groups": []any{
+			"grafana-stg-users",
+			"us-east-1_DNMvWNMWv_GoogleSAML",
+		},
+	}
+
+	id, err := norm.Normalize(claims, "dummy.raw.token")
+	if err != nil {
+		t.Fatalf("failed to normalize: %v", err)
+	}
+
+	if !id.HasRole("grafana-stg-users") {
+		t.Errorf("expected role grafana-stg-users, got: %v", id.Roles)
+	}
+	if id.HasRole("us-east-1_DNMvWNMWv_GoogleSAML") {
+		t.Errorf("expected IdP-association pseudo-group to be filtered out, got: %v", id.Roles)
+	}
+}

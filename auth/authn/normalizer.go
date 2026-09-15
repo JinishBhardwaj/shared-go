@@ -73,16 +73,193 @@ func (n *StandardOIDCNormalizer) Normalize(claims jwt.MapClaims, rawToken string
 	}, nil
 }
 
-// CognitoClaimsNormalizer normalizes AWS Cognito User Pool tokens, including tokens federated from Google SAML.
-type CognitoClaimsNormalizer struct {
-	standard *StandardOIDCNormalizer
+// GroupsExtractor extracts group/role names from one specific IdP-defined
+// claim shape. New Cognito claim shapes (or a customer's own custom-attribute
+// name) are added by implementing this interface, never by editing
+// CognitoClaimsNormalizer.Normalize (Strategy pattern, Open/Closed).
+type GroupsExtractor interface {
+	ExtractGroups(claims jwt.MapClaims) []string
 }
 
-// NewCognitoClaimsNormalizer creates an AWS Cognito claims normalizer.
-func NewCognitoClaimsNormalizer() *CognitoClaimsNormalizer {
-	return &CognitoClaimsNormalizer{
-		standard: NewStandardOIDCNormalizer(),
+// GroupFilter reports whether a group name extracted by a GroupsExtractor
+// should be kept. Composed onto a normalizer via WithGroupFilter so
+// Cognito-specific noise (e.g. a synthetic IdP-association pseudo-group) can
+// be dropped without touching extraction logic.
+type GroupFilter func(group string) bool
+
+// nativeArrayGroupsExtractor reads a claim holding a real JSON array of
+// strings, e.g. Cognito's built-in "cognito:groups".
+type nativeArrayGroupsExtractor struct{ claim string }
+
+// NewNativeArrayGroupsExtractor returns a GroupsExtractor for a claim shaped
+// as a genuine array of strings.
+func NewNativeArrayGroupsExtractor(claim string) GroupsExtractor {
+	return nativeArrayGroupsExtractor{claim: claim}
+}
+
+func (e nativeArrayGroupsExtractor) ExtractGroups(claims jwt.MapClaims) []string {
+	raw, ok := claims[e.claim]
+	if !ok {
+		return nil
 	}
+	slice, ok := raw.([]any)
+	if !ok {
+		return nil
+	}
+	var groups []string
+	for _, g := range slice {
+		if s, ok := g.(string); ok && s != "" {
+			groups = append(groups, s)
+		}
+	}
+	return groups
+}
+
+// cognitoCustomAttrListExtractor reads a Cognito custom attribute populated
+// via SAML attribute mapping from a multi-valued IdP attribute (e.g. Google
+// SAML's "groups"). Cognito custom attributes are always plain strings, so a
+// multi-valued source attribute is flattened into Cognito's own bracketed,
+// comma-separated textual form ("[a, b, c]") rather than a real JSON array --
+// this extractor exists specifically to parse that shape, distinct from
+// nativeArrayGroupsExtractor above.
+type cognitoCustomAttrListExtractor struct{ claim string }
+
+// NewCognitoCustomAttrListExtractor returns a GroupsExtractor for a Cognito
+// custom attribute holding a stringified bracketed list, as produced by
+// mapping a multi-valued SAML attribute (such as a Google SAML "groups"
+// attribute) onto a Cognito custom attribute.
+func NewCognitoCustomAttrListExtractor(claim string) GroupsExtractor {
+	return cognitoCustomAttrListExtractor{claim: claim}
+}
+
+func (e cognitoCustomAttrListExtractor) ExtractGroups(claims jwt.MapClaims) []string {
+	raw, ok := claims[e.claim].(string)
+	if !ok {
+		return nil
+	}
+	raw = strings.TrimSpace(raw)
+	raw = strings.TrimPrefix(raw, "[")
+	raw = strings.TrimSuffix(raw, "]")
+	if raw == "" {
+		return nil
+	}
+	var groups []string
+	for _, part := range strings.Split(raw, ",") {
+		part = strings.TrimSpace(part)
+		if part != "" {
+			groups = append(groups, part)
+		}
+	}
+	return groups
+}
+
+// ExcludeIdPAssociationGroups returns a GroupFilter that drops Cognito's
+// synthetic "<userPoolID>_<providerName>" pseudo-group. Cognito auto-injects
+// this into cognito:groups to record which federated IdP a user linked
+// through -- it is IdP-association bookkeeping, not an authorization
+// grouping an admin assigned, and should not be treated as a role.
+func ExcludeIdPAssociationGroups(userPoolID string) GroupFilter {
+	prefix := userPoolID + "_"
+	return func(group string) bool {
+		return !strings.HasPrefix(group, prefix)
+	}
+}
+
+func filterGroups(groups []string, filters []GroupFilter) []string {
+	if len(filters) == 0 {
+		return groups
+	}
+	out := groups[:0:0]
+	for _, g := range groups {
+		keep := true
+		for _, f := range filters {
+			if !f(g) {
+				keep = false
+				break
+			}
+		}
+		if keep {
+			out = append(out, g)
+		}
+	}
+	return out
+}
+
+// mergeRoles appends incoming to existing, skipping empty values and any
+// value already present (case-insensitive). Shared by every GroupsExtractor
+// consumer (CognitoClaimsNormalizer and IDTokenGroupsEnricher) so there is a
+// single definition of "already have this role."
+func mergeRoles(existing []string, incoming []string) []string {
+	seen := make(map[string]bool, len(existing))
+	for _, r := range existing {
+		seen[strings.ToLower(r)] = true
+	}
+	merged := existing
+	for _, g := range incoming {
+		if g == "" {
+			continue
+		}
+		key := strings.ToLower(g)
+		if seen[key] {
+			continue
+		}
+		seen[key] = true
+		merged = append(merged, g)
+	}
+	return merged
+}
+
+// CognitoClaimsNormalizer normalizes AWS Cognito User Pool tokens, including tokens federated from Google SAML.
+type CognitoClaimsNormalizer struct {
+	standard         *StandardOIDCNormalizer
+	groupsExtractors []GroupsExtractor
+	groupFilters     []GroupFilter
+}
+
+// CognitoNormalizerOption configures a CognitoClaimsNormalizer at construction.
+type CognitoNormalizerOption func(*CognitoClaimsNormalizer)
+
+// WithGroupsExtractor adds a GroupsExtractor to the normalizer's pipeline, in
+// addition to the built-in "cognito:groups" extractor. Groups from every
+// configured extractor are merged (deduplicated case-insensitively) into
+// Principal.Roles.
+func WithGroupsExtractor(e GroupsExtractor) CognitoNormalizerOption {
+	return func(c *CognitoClaimsNormalizer) {
+		c.groupsExtractors = append(c.groupsExtractors, e)
+	}
+}
+
+// WithCustomGroupsAttribute is a convenience option for the common case: a
+// Cognito custom attribute (named by the admin in the Cognito console, e.g.
+// "custom:groups") populated via SAML attribute mapping from an external
+// IdP's multi-valued "groups" attribute.
+func WithCustomGroupsAttribute(claim string) CognitoNormalizerOption {
+	return WithGroupsExtractor(NewCognitoCustomAttrListExtractor(claim))
+}
+
+// WithGroupFilter adds a GroupFilter applied to every extractor's output
+// before merging into Principal.Roles. See ExcludeIdPAssociationGroups for
+// the common Cognito case.
+func WithGroupFilter(f GroupFilter) CognitoNormalizerOption {
+	return func(c *CognitoClaimsNormalizer) {
+		c.groupFilters = append(c.groupFilters, f)
+	}
+}
+
+// NewCognitoClaimsNormalizer creates an AWS Cognito claims normalizer. By
+// default it extracts only Cognito's built-in "cognito:groups" claim; pass
+// WithCustomGroupsAttribute or WithGroupsExtractor to also read groups from a
+// Cognito custom attribute (e.g. SAML-mapped groups), and WithGroupFilter
+// (e.g. ExcludeIdPAssociationGroups) to drop unwanted entries.
+func NewCognitoClaimsNormalizer(opts ...CognitoNormalizerOption) *CognitoClaimsNormalizer {
+	c := &CognitoClaimsNormalizer{
+		standard:         NewStandardOIDCNormalizer(),
+		groupsExtractors: []GroupsExtractor{NewNativeArrayGroupsExtractor("cognito:groups")},
+	}
+	for _, opt := range opts {
+		opt(c)
+	}
+	return c
 }
 
 // Normalize handles AWS Cognito specific claims:
@@ -108,22 +285,13 @@ func (c *CognitoClaimsNormalizer) Normalize(claims jwt.MapClaims, rawToken strin
 		return nil, ErrIDTokenRejected
 	}
 
-	// 1. Map Cognito Groups to Roles (e.g. ["Admins", "Managers"])
-	if rawGroups, ok := claims["cognito:groups"]; ok {
-		if groupsSlice, ok := rawGroups.([]any); ok {
-			existingRoles := make(map[string]bool, len(p.Roles))
-			for _, r := range p.Roles {
-				existingRoles[strings.ToLower(r)] = true
-			}
-			for _, g := range groupsSlice {
-				if gStr, ok := g.(string); ok && gStr != "" {
-					if !existingRoles[strings.ToLower(gStr)] {
-						p.Roles = append(p.Roles, gStr)
-						existingRoles[strings.ToLower(gStr)] = true
-					}
-				}
-			}
-		}
+	// 1. Map groups to Roles via every configured GroupsExtractor (built-in
+	// "cognito:groups" plus any custom-attribute extractor configured via
+	// WithCustomGroupsAttribute/WithGroupsExtractor), filtered through any
+	// configured GroupFilters (e.g. ExcludeIdPAssociationGroups).
+	for _, extractor := range c.groupsExtractors {
+		groups := filterGroups(extractor.ExtractGroups(claims), c.groupFilters)
+		p.Roles = mergeRoles(p.Roles, groups)
 	}
 
 	// 2. Resolve Client ID in Cognito ID tokens vs Access tokens

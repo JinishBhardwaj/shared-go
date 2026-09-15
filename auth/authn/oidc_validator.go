@@ -401,6 +401,48 @@ func (v *OIDCValidator) ValidateToken(ctx context.Context, tokenStr string) (*pr
 	return v.normalizer.Normalize(claims, tokenStr)
 }
 
+// VerifyClaims cryptographically verifies tokenStr -- via the same JWKS
+// verifier, circuit breaker, and kid-gate as ValidateToken -- and returns its
+// raw claims WITHOUT running the configured Normalizer or its token_use
+// enforcement. It exists for tokens that must never be accepted as bearer/
+// API-access proof but whose claims are still needed for enrichment, e.g. a
+// Cognito ID token's SAML-mapped custom groups attribute (see
+// IDTokenGroupsEnricher). Signature/issuer/audience/expiry verification here
+// is identical in strength to ValidateToken's; skipping the normalizer only
+// skips claims-to-Principal mapping and the token_use gate, never weakens
+// cryptographic verification.
+func (v *OIDCValidator) VerifyClaims(ctx context.Context, tokenStr string) (jwt.MapClaims, error) {
+	kid, hasKid := extractUnverifiedKid(tokenStr)
+	now := time.Now()
+	if hasKid {
+		if ok, reason := v.kids.allow(kid, now); !ok {
+			return nil, fmt.Errorf("%w: %s", ErrInvalidToken, reason)
+		}
+	}
+
+	vctx, cancel := context.WithTimeout(ctx, v.verifyTimeout)
+	defer cancel()
+
+	idToken, err := v.verifyBreaker.Execute(func() (*oidc.IDToken, error) {
+		return v.verifier.Verify(vctx, tokenStr)
+	})
+	if err != nil {
+		if hasKid && isKeyResolutionFailure(err) {
+			v.kids.markBad(kid, now)
+		}
+		return nil, fmt.Errorf("%w: %v", ErrInvalidToken, err)
+	}
+	if hasKid {
+		v.kids.markGood(kid)
+	}
+
+	var rawClaims map[string]any
+	if err := idToken.Claims(&rawClaims); err != nil {
+		return nil, fmt.Errorf("%w: failed unmarshaling claims: %v", ErrInvalidToken, err)
+	}
+	return jwt.MapClaims(rawClaims), nil
+}
+
 // audienceIntersects reports whether any of tokenAudiences appears in allowed.
 func audienceIntersects(tokenAudiences, allowed []string) bool {
 	for _, aud := range tokenAudiences {
