@@ -53,9 +53,11 @@ type CognitoOptions struct {
 type AuthenticationBuilder struct {
 	extractorConfig   *ExtractorConfig
 	bearerValidator   BearerTokenValidator
+	issuerRegistry    *authn.IssuerRegistry
 	apiKeyValidator   KeyValidator
 	claimsTransformer principal.ClaimsTransformer
 	middlewareOptions []Option
+	onAuthenticate    func(context.Context, AuthEvent)
 	err               error
 }
 
@@ -109,6 +111,38 @@ func (b *AuthenticationBuilder) AddBearerValidator(validator BearerTokenValidato
 	return b.WithBearerValidator(validator)
 }
 
+// WithIssuerValidator registers validator to handle Bearer tokens whose
+// (unverified, selection-only -- see authn.IssuerRegistry's doc comment)
+// "iss" claim equals issuer, enabling multi-IdP/multi-tenant authentication
+// from a single AuthenticationBuilder (gap-analysis-final.md Tier 4 line
+// 130: "Registry keyed by iss for multi-IdP/multi-tenant"). May be called
+// more than once, once per issuer; each call registers one more issuer
+// without discarding the others. The underlying authn.IssuerRegistry is
+// created lazily on first use and, once created, is what b.bearerValidator
+// is set to -- so a WithIssuerValidator call after WithCognito/
+// WithBearerValidator replaces the single validator those set with the
+// registry (the previously-set single validator is not automatically
+// migrated into the registry; register it explicitly under its own issuer
+// if it must also participate). A token whose "iss" does not match any
+// issuer registered here is rejected (authn.ErrUnknownIssuer) -- there is no
+// default/fallback validator.
+func (b *AuthenticationBuilder) WithIssuerValidator(issuer string, validator BearerTokenValidator) *AuthenticationBuilder {
+	if b.err != nil {
+		return b
+	}
+	if b.issuerRegistry == nil {
+		b.issuerRegistry = authn.NewIssuerRegistry()
+	}
+	b.issuerRegistry.Register(issuer, validator)
+	b.bearerValidator = b.issuerRegistry
+	return b
+}
+
+// AddIssuerValidator is an alias for WithIssuerValidator.
+func (b *AuthenticationBuilder) AddIssuerValidator(issuer string, validator BearerTokenValidator) *AuthenticationBuilder {
+	return b.WithIssuerValidator(issuer, validator)
+}
+
 // WithApiKeyValidator sets an API key validator.
 func (b *AuthenticationBuilder) WithApiKeyValidator(validator KeyValidator) *AuthenticationBuilder {
 	b.apiKeyValidator = validator
@@ -137,6 +171,18 @@ func (b *AuthenticationBuilder) AddClaimsTransformation(transformer principal.Cl
 	return b.WithClaimsTransformation(transformer)
 }
 
+// WithOnAuthenticate registers fn to be called once per Authenticate call on
+// the built Authenticator, with the already-fully-computed outcome (Tier 4
+// audit-hook / metrics-decorator support -- see AuthEvent and
+// CompositeAuthenticatorConfig.OnAuthenticate).
+func (b *AuthenticationBuilder) WithOnAuthenticate(fn func(context.Context, AuthEvent)) *AuthenticationBuilder {
+	if b.err != nil {
+		return b
+	}
+	b.onAuthenticate = fn
+	return b
+}
+
 // WithOption appends middleware configuration options (e.g. WithContextKey, WithRealm).
 func (b *AuthenticationBuilder) WithOption(opts ...Option) *AuthenticationBuilder {
 	b.middlewareOptions = append(b.middlewareOptions, opts...)
@@ -162,6 +208,7 @@ func (b *AuthenticationBuilder) Build() (Authenticator, error) {
 		ExtractorConfig: extCfg,
 		BearerValidator: b.bearerValidator,
 		APIKeyValidator: b.apiKeyValidator,
+		OnAuthenticate:  b.onAuthenticate,
 	})
 
 	return compositeAuth, nil

@@ -9,6 +9,7 @@ import (
 	"math/big"
 	"net/http"
 	"net/http/httptest"
+	"sync"
 	"testing"
 	"time"
 
@@ -118,6 +119,62 @@ func TestAuthenticationBuilder_BuildSucceedsWithBearerValidatorConfigured(t *tes
 	}
 	if authenticator == nil {
 		t.Fatal("expected a non-nil Authenticator")
+	}
+}
+
+// TestAuthenticationBuilder_WithOnAuthenticate_FiresOnRealAuthenticate is the
+// Tier 4 builder-wiring regression test: WithOnAuthenticate must fire on a
+// real Authenticate call through a built Authenticator, not just in a unit
+// test of CompositeAuthenticatorConfig.OnAuthenticate itself.
+func TestAuthenticationBuilder_WithOnAuthenticate_FiresOnRealAuthenticate(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	val := &mockValidator{
+		principal: &principal.Principal{
+			Subject: "user_123",
+		},
+	}
+
+	var mu sync.Mutex
+	var events []AuthEvent
+
+	middleware, err := NewBuilder().
+		WithBearerValidator(val).
+		WithOnAuthenticate(func(_ context.Context, e AuthEvent) {
+			mu.Lock()
+			defer mu.Unlock()
+			events = append(events, e)
+		}).
+		BuildMiddleware()
+	if err != nil {
+		t.Fatalf("unexpected error building middleware: %v", err)
+	}
+
+	r := gin.New()
+	r.Use(middleware)
+	r.GET("/test", func(c *gin.Context) {
+		c.String(http.StatusOK, "ok")
+	})
+
+	req, _ := http.NewRequest(http.MethodGet, "/test", nil)
+	req.Header.Set("Authorization", "Bearer dummy-token")
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200 OK, got %d: %s", w.Code, w.Body.String())
+	}
+
+	mu.Lock()
+	defer mu.Unlock()
+	if len(events) != 1 {
+		t.Fatalf("expected exactly 1 reported AuthEvent, got %d: %+v", len(events), events)
+	}
+	if events[0].CredentialType != "bearer" {
+		t.Errorf("expected CredentialType %q, got %q", "bearer", events[0].CredentialType)
+	}
+	if !events[0].Success {
+		t.Errorf("expected Success=true, got false")
 	}
 }
 
