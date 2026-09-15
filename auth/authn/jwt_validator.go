@@ -41,6 +41,12 @@ type JWTValidatorConfig struct {
 	// Normalizer maps claims into an Identity. Optional.
 	// Defaults to StandardOIDCNormalizer if nil.
 	Normalizer ClaimsNormalizer
+
+	// TypEnforcement controls RFC 9068 "typ: at+jwt" header enforcement.
+	// Defaults to TypEnforcementOff (the zero value) -- see
+	// TypEnforcementMode's doc comment for why this must not default to
+	// strict.
+	TypEnforcement TypEnforcementMode
 }
 
 // JWTValidator validates Bearer JWT tokens and maps them to an Identity.
@@ -97,6 +103,15 @@ func (v *JWTValidator) ValidateToken(ctx context.Context, tokenStr string) (*pri
 
 	if !parsedToken.Valid {
 		return nil, ErrInvalidToken
+	}
+
+	// RFC 9068 typ enforcement (Tier 4, optional hardening -- config-gated,
+	// defaults to off; see TypEnforcementMode's doc comment). Applied only
+	// after the signature above has already been verified, since the typ
+	// header is part of the signed content and is only safe to trust once
+	// verification has succeeded.
+	if err := enforceTyp(v.config.TypEnforcement, tokenStr); err != nil {
+		return nil, err
 	}
 
 	return v.config.Normalizer.Normalize(claims, tokenStr)

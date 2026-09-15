@@ -46,6 +46,14 @@ type CognitoOptions struct {
 	// per the underlying OIDC validator's requirements, but logs a loud
 	// server-side warning instead of skipping silently).
 	SkipClientIDCheck bool
+
+	// TypEnforcement controls RFC 9068 "typ: at+jwt" header enforcement.
+	// Defaults to authn.TypEnforcementOff (the zero value) -- AWS Cognito
+	// access tokens do not set a typ header by default, so enabling
+	// authn.TypEnforcementStrict here without confirming your own user
+	// pool's token shape will reject every token. See
+	// authn.TypEnforcementMode's doc comment.
+	TypEnforcement authn.TypEnforcementMode
 }
 
 // AuthenticationBuilder provides a fluent builder for authn configuration,
@@ -85,6 +93,7 @@ func (b *AuthenticationBuilder) WithCognito(ctx context.Context, opts CognitoOpt
 		SupportedSigningAlgs: []string{"RS256"},
 		Normalizer:           authn.NewCognitoClaimsNormalizer(),
 		CustomKeySetURL:      opts.CustomKeySetURL,
+		TypEnforcement:       opts.TypEnforcement,
 	})
 	if err != nil {
 		b.err = fmt.Errorf("authn: failed configuring Cognito validator: %w", err)

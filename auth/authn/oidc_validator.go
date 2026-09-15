@@ -114,6 +114,14 @@ type OIDCValidatorConfig struct {
 	// regardless of concurrent unknown-kid traffic.
 	KidRateLimitPerSecond float64
 	KidRateLimitBurst     int
+
+	// TypEnforcement controls RFC 9068 "typ: at+jwt" header enforcement.
+	// Defaults to TypEnforcementOff (the zero value). AWS Cognito access
+	// tokens do NOT set a typ header in their default configuration --
+	// enabling TypEnforcementStrict against Cognito will reject every
+	// token. See TypEnforcementMode's doc comment for the full explanation
+	// and TypEnforcementIfPresent for a safer opt-in shape.
+	TypEnforcement TypEnforcementMode
 }
 
 // OIDCValidator uses github.com/coreos/go-oidc/v3 to perform dynamic OIDC discovery,
@@ -137,6 +145,10 @@ type OIDCValidator struct {
 	// verified successfully (Tier 3 JWKS hardening). See kidGate's own doc
 	// comment for the fail-closed-in-the-safe-direction guarantee.
 	kids *kidGate
+
+	// typEnforcement controls RFC 9068 "typ: at+jwt" header enforcement.
+	// See OIDCValidatorConfig.TypEnforcement.
+	typEnforcement TypEnforcementMode
 }
 
 // discoveryBreakers is a package-level registry of one
@@ -304,6 +316,7 @@ func NewOIDCValidator(ctx context.Context, cfg OIDCValidatorConfig) (*OIDCValida
 		verifyBreaker:    gobreaker.NewCircuitBreaker[*oidc.IDToken](gobreaker.Settings{Name: "authn-oidc-verify:" + cfg.IssuerURL}),
 		verifyTimeout:    verifyTimeout,
 		kids:             newKidGate(cfg.NegativeKidCacheTTL, cfg.KidRateLimitPerSecond, cfg.KidRateLimitBurst),
+		typEnforcement:   cfg.TypEnforcement,
 	}, nil
 }
 
@@ -356,6 +369,16 @@ func (v *OIDCValidator) ValidateToken(ctx context.Context, tokenStr string) (*pr
 	}
 	if hasKid {
 		v.kids.markGood(kid)
+	}
+
+	// RFC 9068 typ enforcement (Tier 4, optional hardening -- config-gated,
+	// defaults to off). Applied only after the signature above has already
+	// been verified (idToken came back with err == nil), since the typ
+	// header is part of the signed content and is only safe to trust once
+	// verification has succeeded. See TypEnforcementMode's doc comment for
+	// why this defaults to off (AWS Cognito does not set typ by default).
+	if err := enforceTyp(v.typEnforcement, tokenStr); err != nil {
+		return nil, err
 	}
 
 	// Tier 0 #4: when configured with multiple AllowedAudiences, go-oidc's
