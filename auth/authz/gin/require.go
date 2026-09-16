@@ -48,6 +48,7 @@ const (
 	modeRoleAll
 	modeRoleAny
 	modeMethod
+	modeUserPresent
 )
 
 func (m requireMode) String() string {
@@ -65,7 +66,9 @@ func (m requireMode) String() string {
 	case modeRoleAny:
 		return "WithAnyRole"
 	case modeMethod:
-		return "WithMethods/WithUserPresent/WithM2M"
+		return "WithMethods/WithM2M"
+	case modeUserPresent:
+		return "WithUserPresent"
 	default:
 		return "none"
 	}
@@ -206,11 +209,20 @@ func WithMethods(methods ...principal.AuthMethod) RequireOption {
 	}
 }
 
-// WithUserPresent requires an interactive end-user flow (AuthCode+PKCE or
-// Device Flow). Replaces RequireUser(). Equivalent to
-// WithMethods(principal.AuthMethodAuthCodePKCE, principal.AuthMethodDeviceFlow).
+// WithUserPresent requires an interactive end-user flow. Replaces
+// RequireUser(). Checks principal.Principal.IsUserPresent() (i.e.
+// UserPresent, a positive signal the ClaimsNormalizer determined at
+// authn time) via the same authz.UserPresentRequirement/UserPresentHandler
+// authz.PolicyBuilder.RequireUser() uses -- deliberately NOT implemented as
+// WithMethods(AuthCodePKCE, DeviceFlow) (as it was before UserPresent was
+// split out of Method): that would silently diverge from RequireUser()'s
+// semantics again, checking Method directly instead of the dedicated
+// signal. See principal.Principal.UserPresent's doc comment for why the two
+// are different fields.
 func WithUserPresent() RequireOption {
-	return WithMethods(principal.AuthMethodAuthCodePKCE, principal.AuthMethodDeviceFlow)
+	return func(cfg *requireConfig) {
+		setMode(cfg, modeUserPresent)
+	}
 }
 
 // WithM2M requires an automated Machine-to-Machine flow (Client Credentials
@@ -221,9 +233,10 @@ func WithM2M() RequireOption {
 }
 
 var (
-	scopeHandler  = &authz.ScopeRequirementHandler{}
-	roleHandler   = &authz.RoleRequirementHandler{}
-	methodHandler = &authz.MethodRequirementHandler{}
+	scopeHandler       = &authz.ScopeRequirementHandler{}
+	roleHandler        = &authz.RoleRequirementHandler{}
+	methodHandler      = &authz.MethodRequirementHandler{}
+	userPresentHandler = &authz.UserPresentHandler{}
 )
 
 // ResourceExtractorFunc extracts the target domain Resource from the incoming Gin context.
@@ -297,6 +310,8 @@ func Require(opts ...RequireOption) gin.HandlerFunc {
 			requireRoleGuard(c, cfg.roles, false)
 		case modeMethod:
 			requireMethodGuard(c, cfg.methods)
+		case modeUserPresent:
+			requireUserPresentGuard(c)
 		}
 	}
 }
@@ -508,6 +523,27 @@ func requireMethodGuard(c *gin.Context, methods []principal.AuthMethod) {
 		}
 		desc := fmt.Sprintf("This endpoint requires authentication via [%s], but received [%s]", strings.Join(methodNames, ", "), user.Method)
 		writeForbiddenProblem(c, "disallowed_auth_flow", desc, map[string]any{"current_method": user.Method})
+		c.Abort()
+		return
+	}
+
+	c.Next()
+}
+
+// requireUserPresentGuard evaluates authz.UserPresentRequirement via
+// userPresentHandler -- i.e. principal.Principal.IsUserPresent()/UserPresent,
+// NOT a direct Method comparison. See WithUserPresent's doc comment for why
+// this must stay a separate mode from modeMethod.
+func requireUserPresentGuard(c *gin.Context) {
+	user := ginprincipal.User(c)
+	if user == nil {
+		respondNoPrincipalForbidden(c)
+		return
+	}
+
+	allowed, _ := userPresentHandler.Handle(c.Request.Context(), user, authz.UserPresentRequirement{}, nil)
+	if !allowed {
+		writeForbiddenProblem(c, "user_not_present", "This endpoint requires an interactive end-user flow", map[string]any{"current_method": user.Method})
 		c.Abort()
 		return
 	}

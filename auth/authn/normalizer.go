@@ -40,7 +40,7 @@ func (n *StandardOIDCNormalizer) Normalize(claims jwt.MapClaims, rawToken string
 		return nil, ErrMissingSubject
 	}
 
-	clientID := extractClientID(claims)
+	clientID := ExtractClientID(claims)
 	scopes := extractScopes(claims)
 	roles := extractRoles(claims)
 	flow := determineOAuthFlow(claims, clientID, sub)
@@ -59,17 +59,22 @@ func (n *StandardOIDCNormalizer) Normalize(claims jwt.MapClaims, rawToken string
 	metadata := filterStandardClaims(claims)
 
 	return &principal.Principal{
-		Subject:   sub,
-		ClientID:  clientID,
-		Method:    flow,
-		Scopes:    scopes,
-		Roles:     roles,
-		Issuer:    issuer,
-		Audiences: audiences,
-		IssuedAt:  issuedAt,
-		ExpiresAt: expiresAt,
-		Metadata:  metadata,
-		RawToken:  rawToken,
+		Subject:  sub,
+		ClientID: clientID,
+		Method:   flow,
+		// Computed from the same positive-signal-only flow determination as
+		// Method, at this same trusted point -- see principal.Principal.UserPresent's
+		// doc comment for why IsUserPresent() reads this field directly
+		// instead of re-deriving it from Method.
+		UserPresent: flow == principal.AuthMethodAuthCodePKCE || flow == principal.AuthMethodDeviceFlow,
+		Scopes:      scopes,
+		Roles:       roles,
+		Issuer:      issuer,
+		Audiences:   audiences,
+		IssuedAt:    issuedAt,
+		ExpiresAt:   expiresAt,
+		Metadata:    metadata,
+		RawToken:    rawToken,
 	}, nil
 }
 
@@ -344,8 +349,11 @@ func filterStandardClaims(claims jwt.MapClaims) map[string]any {
 	return metadata
 }
 
-// extractClientID retrieves client_id, azp (authorized party), or cid claim.
-func extractClientID(claims jwt.MapClaims) string {
+// ExtractClientID retrieves the client_id, azp (authorized party), or cid
+// claim -- exported so an AudienceValidator callback can identify the
+// caller for token shapes (e.g. AWS Cognito client_credentials access
+// tokens) that carry no "aud" claim at all, only client_id.
+func ExtractClientID(claims jwt.MapClaims) string {
 	if cid, ok := claims["client_id"].(string); ok && cid != "" {
 		return cid
 	}

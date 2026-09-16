@@ -99,8 +99,8 @@ func TestRequireAnyRole(t *testing.T) {
 }
 
 func TestRequireMethod_RequireUser_RequireM2M(t *testing.T) {
-	pkce := &principal.Principal{Subject: "u1", Method: principal.AuthMethodAuthCodePKCE}
-	device := &principal.Principal{Subject: "u2", Method: principal.AuthMethodDeviceFlow}
+	pkce := &principal.Principal{Subject: "u1", Method: principal.AuthMethodAuthCodePKCE, UserPresent: true}
+	device := &principal.Principal{Subject: "u2", Method: principal.AuthMethodDeviceFlow, UserPresent: true}
 	clientCreds := &principal.Principal{Subject: "svc1", Method: principal.AuthMethodClientCredentials}
 	apiKey := &principal.Principal{Subject: "svc2", Method: principal.AuthMethodAPIKey}
 

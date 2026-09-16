@@ -35,8 +35,23 @@ type Principal struct {
 	// ClientID is the OAuth client identifier or API key client identifier.
 	ClientID string `json:"client_id,omitempty"`
 
-	// Method is the authentication method or OAuth flow used.
+	// Method is the authentication method or OAuth flow used -- pure
+	// provenance/diagnostic metadata (what actually happened), not an
+	// authorization signal. IsUserPresent() does NOT read this field; see
+	// UserPresent below for why the two are deliberately separate.
 	Method AuthMethod `json:"method"`
+
+	// UserPresent records whether an interactive end-user (as opposed to an
+	// M2M client or API key) is present, per authn's positive-signal-only
+	// determination (an explicit grant_type/gty, amr, or per-issuer opt-in --
+	// never inferred from a subject merely being present, since some IdPs'
+	// client-credentials tokens carry a subject too). Set once by the
+	// ClaimsNormalizer at the same point Method is determined, from the same
+	// underlying signal -- decoupled from Method itself so a caller (e.g. a
+	// dev/test Authenticator with no real OAuth flow to report) can assert
+	// this fact honestly without also having to claim a specific flow that
+	// never happened.
+	UserPresent bool `json:"user_present"`
 
 	// Scopes is the list of granted permission scopes (e.g. ["read:users", "write:orders"]).
 	Scopes []string `json:"scopes,omitempty"`
@@ -140,12 +155,13 @@ func (p *Principal) HasAnyRole(candidateRoles ...string) bool {
 }
 
 // IsUserPresent returns true if the request was authenticated by an interactive end-user flow
-// (e.g. AuthCode+PKCE or Device Flow), as opposed to an automated M2M client or API key.
+// (e.g. AuthCode+PKCE or Device Flow), as opposed to an automated M2M client or API key. Reads
+// UserPresent directly -- see its doc comment for why this is not derived from Method.
 func (p *Principal) IsUserPresent() bool {
 	if p == nil {
 		return false
 	}
-	return p.Method == AuthMethodAuthCodePKCE || p.Method == AuthMethodDeviceFlow
+	return p.UserPresent
 }
 
 // ClaimsTransformer dynamically augments an authenticated Principal with domain data from the database.

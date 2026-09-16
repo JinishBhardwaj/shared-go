@@ -19,6 +19,43 @@ var (
 	ErrOIDCProviderInit = errors.New("authn: failed to initialize OIDC provider")
 )
 
+// AudienceValidator is a callback for dynamic audience/client acceptance
+// checks -- e.g. a runtime-onboarded M2M client list stored in a database,
+// which can't be expressed as a static AllowedAudiences slice at
+// validator-construction time because new entries are added after the
+// validator is already built. Mirrors ASP.NET Core's
+// TokenValidationParameters.AudienceValidator: audience acceptance is
+// authn's decision (rejects as ErrInvalidAudience, i.e. a 401), never
+// authz's (403) -- checking whether a client is currently ACTIVE/not-revoked,
+// or any other business-state decision, does not belong in this hook; that
+// is what authz.RequirementHandler is for.
+//
+// Deliberately receives the full parsed claims, not just an "aud" list:
+// AWS Cognito's own client_credentials (M2M) access tokens carry no "aud"
+// claim at all, only client_id -- the standard OIDC "audience" model
+// doesn't fit every real IdP/grant-type combination. claims.GetAudience()
+// works for callers with real "aud" claims; ExtractClientID(claims) covers
+// Cognito-style client_id/azp/cid tokens instead.
+//
+// Called only after cryptographic verification (signature/issuer/expiry)
+// has already succeeded, from ValidateToken's own goroutine -- it must not
+// block indefinitely or panic (same contract as OnDecision/OnAuthenticate
+// elsewhere in this module).
+//
+//   - Returning (true, nil) accepts the token.
+//   - Returning (false, nil) is a deliberate, definitive rejection (this
+//     audience/client is not accepted) -- fails closed, and never counts as
+//     a breaker failure: this is the callback doing its job correctly, not
+//     the callback failing.
+//   - Returning a non-nil error signals a transient failure of the check
+//     ITSELF (e.g. the backing database is unreachable), not a legitimate
+//     answer. Always treated as "not accepted" (fail closed, same as every
+//     other error path in this validator), but DOES count as a breaker
+//     failure, so a sustained backend outage opens the breaker and stops
+//     hammering the failing dependency instead of blocking every
+//     subsequent token validation on it.
+type AudienceValidator func(ctx context.Context, claims jwt.MapClaims) (bool, error)
+
 // OIDCValidatorConfig configures dynamic OIDC discovery and JWKS validation.
 type OIDCValidatorConfig struct {
 	// IssuerURL is the base URL of the Identity Provider (e.g. "https://cognito-idp.us-east-1.amazonaws.com/us-east-1_abcdef").
@@ -36,6 +73,24 @@ type OIDCValidatorConfig struct {
 	// by several app clients). A token is accepted if its audience
 	// intersects this list. Ignored if ExpectedClientID is set.
 	AllowedAudiences []string
+
+	// AudienceValidator, if set, is consulted as an additional, independent
+	// acceptance path alongside ExpectedClientID/AllowedAudiences -- a token
+	// is accepted if it matches ANY configured check. Setting this defers
+	// the ENTIRE audience decision to ValidateToken (go-oidc's own
+	// single-ClientID enforcement is skipped, even if ExpectedClientID is
+	// also set) so this callback always gets a chance to accept a token
+	// go-oidc's static check alone would have rejected. See
+	// AudienceValidator's own doc comment for its contract.
+	AudienceValidator AudienceValidator
+
+	// AudienceValidatorTimeout bounds each AudienceValidator call with a
+	// context deadline, independent of the caller's own inbound context.
+	// Defaults to 50ms -- the gap analysis's stated figure for repo/Redis
+	// calls (unlike VerifyTimeout's discovery/JWKS network round trip, this
+	// hook's typical use case -- a local database or cache lookup -- fits
+	// that figure directly). Ignored if AudienceValidator is nil.
+	AudienceValidatorTimeout time.Duration
 
 	// SkipClientIDCheck disables client_id/aud enforcement entirely. This
 	// must be set explicitly and deliberately (Tier 0 #4: it used to be
@@ -130,7 +185,20 @@ type OIDCValidator struct {
 	provider         *oidc.Provider
 	verifier         *oidc.IDTokenVerifier
 	normalizer       ClaimsNormalizer
+	expectedClientID string
 	allowedAudiences []string
+
+	// audienceValidator, audienceValidatorTimeout, and audienceValidatorBreaker
+	// implement OIDCValidatorConfig.AudienceValidator -- a per-validator
+	// breaker (not shared with verifyBreaker: a failing audience backend and
+	// a failing JWKS endpoint are independent failure domains and must not
+	// trip each other's breaker) guards the same class of external call
+	// verifyBreaker guards for JWKS fetches. Not exposed as a public field,
+	// same "don't leak the breaker library into the public API" reasoning
+	// as verifyBreaker.
+	audienceValidator        AudienceValidator
+	audienceValidatorTimeout time.Duration
+	audienceValidatorBreaker *gobreaker.CircuitBreaker[bool]
 
 	// verifyBreaker and verifyTimeout guard ValidateToken's JWKS-fetching
 	// verifier.Verify call (Tier 3 "deadlines + breakers" for JWKS fetch).
@@ -236,17 +304,20 @@ func NewOIDCValidator(ctx context.Context, cfg OIDCValidatorConfig) (*OIDCValida
 
 	// Tier 0 #4: audience enforcement must be explicit. A single
 	// ExpectedClientID is enforced by go-oidc itself (SkipClientIDCheck
-	// stays false). Multiple AllowedAudiences can't be expressed in
-	// go-oidc's single-ClientID config, so that check is deferred to
-	// ValidateToken below and go-oidc's own check is skipped for this case
-	// only. If neither is configured, the caller gets a loud server-side
-	// warning instead of a silently-disabled check.
-	multiAudience := cfg.ExpectedClientID == "" && len(cfg.AllowedAudiences) > 0
-	skipClientIDCheck := cfg.SkipClientIDCheck || multiAudience
-	if cfg.ExpectedClientID == "" && len(cfg.AllowedAudiences) == 0 && !cfg.SkipClientIDCheck {
-		log.Printf("authn: OIDCValidator for issuer %q configured with no ExpectedClientID and no "+
-			"AllowedAudiences -- audience validation is DISABLED. Set one of them, or pass "+
-			"SkipClientIDCheck explicitly if this is deliberate.", cfg.IssuerURL)
+	// stays false) UNLESS an AudienceValidator is also configured, in which
+	// case go-oidc's hard single-ClientID rejection would prevent the
+	// callback from ever getting a chance to accept a different audience --
+	// so the whole decision defers to ValidateToken below instead. Multiple
+	// AllowedAudiences can't be expressed in go-oidc's single-ClientID
+	// config either, so that case defers the same way. If nothing at all is
+	// configured, the caller gets a loud server-side warning instead of a
+	// silently-disabled check.
+	deferToValidateToken := cfg.AudienceValidator != nil || (cfg.ExpectedClientID == "" && len(cfg.AllowedAudiences) > 0)
+	skipClientIDCheck := cfg.SkipClientIDCheck || deferToValidateToken
+	if cfg.ExpectedClientID == "" && len(cfg.AllowedAudiences) == 0 && cfg.AudienceValidator == nil && !cfg.SkipClientIDCheck {
+		log.Printf("authn: OIDCValidator for issuer %q configured with no ExpectedClientID, no "+
+			"AllowedAudiences, and no AudienceValidator -- audience validation is DISABLED. Set one "+
+			"of them, or pass SkipClientIDCheck explicitly if this is deliberate.", cfg.IssuerURL)
 		skipClientIDCheck = true
 	}
 
@@ -303,20 +374,31 @@ func NewOIDCValidator(ctx context.Context, cfg OIDCValidatorConfig) (*OIDCValida
 		verifier = p.Verifier(oidcConfig)
 	}
 
+	var expectedClientID string
 	var allowedAudiences []string
-	if multiAudience {
+	if deferToValidateToken {
+		expectedClientID = cfg.ExpectedClientID
 		allowedAudiences = cfg.AllowedAudiences
 	}
 
+	audienceValidatorTimeout := cfg.AudienceValidatorTimeout
+	if audienceValidatorTimeout <= 0 {
+		audienceValidatorTimeout = 50 * time.Millisecond
+	}
+
 	return &OIDCValidator{
-		provider:         provider,
-		verifier:         verifier,
-		normalizer:       norm,
-		allowedAudiences: allowedAudiences,
-		verifyBreaker:    gobreaker.NewCircuitBreaker[*oidc.IDToken](gobreaker.Settings{Name: "authn-oidc-verify:" + cfg.IssuerURL}),
-		verifyTimeout:    verifyTimeout,
-		kids:             newKidGate(cfg.NegativeKidCacheTTL, cfg.KidRateLimitPerSecond, cfg.KidRateLimitBurst),
-		typEnforcement:   cfg.TypEnforcement,
+		provider:                 provider,
+		verifier:                 verifier,
+		normalizer:               norm,
+		expectedClientID:         expectedClientID,
+		allowedAudiences:         allowedAudiences,
+		audienceValidator:        cfg.AudienceValidator,
+		audienceValidatorTimeout: audienceValidatorTimeout,
+		audienceValidatorBreaker: gobreaker.NewCircuitBreaker[bool](gobreaker.Settings{Name: "authn-oidc-audience-validator:" + cfg.IssuerURL}),
+		verifyBreaker:            gobreaker.NewCircuitBreaker[*oidc.IDToken](gobreaker.Settings{Name: "authn-oidc-verify:" + cfg.IssuerURL}),
+		verifyTimeout:            verifyTimeout,
+		kids:                     newKidGate(cfg.NegativeKidCacheTTL, cfg.KidRateLimitPerSecond, cfg.KidRateLimitBurst),
+		typEnforcement:           cfg.TypEnforcement,
 	}, nil
 }
 
@@ -381,23 +463,42 @@ func (v *OIDCValidator) ValidateToken(ctx context.Context, tokenStr string) (*pr
 		return nil, err
 	}
 
-	// Tier 0 #4: when configured with multiple AllowedAudiences, go-oidc's
-	// own single-ClientID check was deliberately skipped in
-	// NewOIDCValidator above -- enforce it here instead, requiring the
-	// token's audience to intersect the allowed set. This must never be
-	// treated as optional: an empty allowedAudiences here means "no
-	// restriction was configured" (see NewOIDCValidator's warning log for
-	// that case), not "skip silently."
-	if len(v.allowedAudiences) > 0 && !audienceIntersects(idToken.Audience, v.allowedAudiences) {
-		return nil, fmt.Errorf("%w: token audience %v not in allowed set %v", ErrInvalidAudience, idToken.Audience, v.allowedAudiences)
-	}
-
 	var rawClaims map[string]any
 	if err := idToken.Claims(&rawClaims); err != nil {
 		return nil, fmt.Errorf("%w: failed unmarshaling claims: %v", ErrInvalidToken, err)
 	}
-
 	claims := jwt.MapClaims(rawClaims)
+
+	// Tier 0 #4: when go-oidc's own single-ClientID check was deferred in
+	// NewOIDCValidator (multiple AllowedAudiences and/or an
+	// AudienceValidator configured), enforce audience acceptance here
+	// instead -- accepted if the token matches ANY configured path: the
+	// static ExpectedClientID, the static AllowedAudiences set, or the
+	// dynamic AudienceValidator (given the full claims, not just "aud" --
+	// see AudienceValidator's doc comment for why). This must never be
+	// treated as optional: reaching this block with nothing configured on
+	// the struct would mean "no restriction was configured" (see
+	// NewOIDCValidator's warning log for that case), not "skip silently" --
+	// but NewOIDCValidator only ever populates these fields when at least
+	// one really was configured, so the guard below is never vacuously true.
+	if v.expectedClientID != "" || len(v.allowedAudiences) > 0 || v.audienceValidator != nil {
+		accepted := (v.expectedClientID != "" && audienceIntersects(idToken.Audience, []string{v.expectedClientID})) ||
+			(len(v.allowedAudiences) > 0 && audienceIntersects(idToken.Audience, v.allowedAudiences))
+
+		if !accepted && v.audienceValidator != nil {
+			actx, cancel := context.WithTimeout(ctx, v.audienceValidatorTimeout)
+			ok, dynErr := v.audienceValidatorBreaker.Execute(func() (bool, error) {
+				return v.audienceValidator(actx, claims)
+			})
+			cancel()
+			accepted = dynErr == nil && ok
+		}
+
+		if !accepted {
+			return nil, fmt.Errorf("%w: token audience %v not accepted", ErrInvalidAudience, idToken.Audience)
+		}
+	}
+
 	return v.normalizer.Normalize(claims, tokenStr)
 }
 

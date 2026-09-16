@@ -41,8 +41,9 @@ func TestRequirePolicyGuard_UsesLogicalActionNotRawVerb(t *testing.T) {
 		r := gin.New()
 		r.Use(func(c *gin.Context) {
 			ginprincipal.Set(c, &principal.Principal{
-				Subject: "creator_1",
-				Method:  principal.AuthMethodAuthCodePKCE,
+				Subject:     "creator_1",
+				Method:      principal.AuthMethodAuthCodePKCE,
+				UserPresent: true,
 			})
 			c.Next()
 		})

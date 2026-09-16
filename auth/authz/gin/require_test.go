@@ -41,9 +41,10 @@ func TestGinGuard_RequirePolicyAndPARC(t *testing.T) {
 		caller := c.GetHeader("X-Test-User")
 		if caller != "" {
 			ginprincipal.Set(c, &principal.Principal{
-				Subject: caller,
-				Roles:   []string{"user"},
-				Method:  principal.AuthMethodAuthCodePKCE,
+				Subject:     caller,
+				Roles:       []string{"user"},
+				Method:      principal.AuthMethodAuthCodePKCE,
+				UserPresent: true,
 			})
 		}
 		c.Next()
@@ -125,7 +126,7 @@ func TestRequirePARC_NeverLeaksRawInternalErrorText(t *testing.T) {
 
 	r := gin.New()
 	r.Use(func(c *gin.Context) {
-		ginprincipal.Set(c, &principal.Principal{Subject: "user_1", Method: principal.AuthMethodAuthCodePKCE})
+		ginprincipal.Set(c, &principal.Principal{Subject: "user_1", Method: principal.AuthMethodAuthCodePKCE, UserPresent: true})
 		c.Next()
 	})
 	r.GET("/reports/:reportId",

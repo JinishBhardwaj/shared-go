@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"time"
 
 	"github.com/JinishBhardwaj/shared-go/auth/authn"
 	"github.com/JinishBhardwaj/shared-go/auth/principal"
@@ -40,6 +41,18 @@ type CognitoOptions struct {
 	// get real enforcement.
 	AllowedAudiences []string
 
+	// AudienceValidator, if set, is consulted as an additional, independent
+	// acceptance path alongside ClientID/AllowedAudiences -- e.g. a
+	// runtime-onboarded M2M client list stored in a database, which can't be
+	// known as a static ID/list at builder-construction time. See
+	// authn.AudienceValidator's own doc comment for its full contract
+	// (bounded, breaker-guarded, fail-closed; a 401, never a 403).
+	AudienceValidator authn.AudienceValidator
+
+	// AudienceValidatorTimeout bounds each AudienceValidator call. Defaults
+	// to 50ms. Ignored if AudienceValidator is nil.
+	AudienceValidatorTimeout time.Duration
+
 	// SkipClientIDCheck explicitly disables audience/client-ID enforcement.
 	// This must be set true on purpose -- it is never silently implied by
 	// leaving ClientID and AllowedAudiences empty (that path still works,
@@ -63,6 +76,7 @@ type AuthenticationBuilder struct {
 	bearerValidator   BearerTokenValidator
 	issuerRegistry    *authn.IssuerRegistry
 	apiKeyValidator   KeyValidator
+	authenticator     Authenticator
 	claimsTransformer principal.ClaimsTransformer
 	middlewareOptions []Option
 	onAuthenticate    func(context.Context, AuthEvent)
@@ -86,14 +100,16 @@ func (b *AuthenticationBuilder) WithCognito(ctx context.Context, opts CognitoOpt
 	}
 
 	validator, err := authn.NewOIDCValidator(ctx, authn.OIDCValidatorConfig{
-		IssuerURL:            issuerURL,
-		ExpectedClientID:     opts.ClientID,
-		AllowedAudiences:     opts.AllowedAudiences,
-		SkipClientIDCheck:    opts.SkipClientIDCheck,
-		SupportedSigningAlgs: []string{"RS256"},
-		Normalizer:           authn.NewCognitoClaimsNormalizer(),
-		CustomKeySetURL:      opts.CustomKeySetURL,
-		TypEnforcement:       opts.TypEnforcement,
+		IssuerURL:                issuerURL,
+		ExpectedClientID:         opts.ClientID,
+		AllowedAudiences:         opts.AllowedAudiences,
+		AudienceValidator:        opts.AudienceValidator,
+		AudienceValidatorTimeout: opts.AudienceValidatorTimeout,
+		SkipClientIDCheck:        opts.SkipClientIDCheck,
+		SupportedSigningAlgs:     []string{"RS256"},
+		Normalizer:               authn.NewCognitoClaimsNormalizer(),
+		CustomKeySetURL:          opts.CustomKeySetURL,
+		TypEnforcement:           opts.TypEnforcement,
 	})
 	if err != nil {
 		b.err = fmt.Errorf("authn: failed configuring Cognito validator: %w", err)
@@ -163,6 +179,23 @@ func (b *AuthenticationBuilder) AddApiKeyValidator(validator KeyValidator) *Auth
 	return b.WithApiKeyValidator(validator)
 }
 
+// WithAuthenticator sets an explicit Authenticator, bypassing credential
+// extraction and WithBearerValidator/WithCognito/WithApiKeyValidator
+// entirely -- Build()/BuildMiddleware() return it directly (still
+// decorated with WithOnAuthenticate's hook and WithClaimsTransformation, if
+// either is set, exactly as the composite path is). For an Authenticator
+// that doesn't fit the bearer/API-key credential model at all -- e.g.
+// authtest.NoopAuthenticator for a dev-mode bypass, which needs to run
+// through the same pipeline.Setup path production wiring does, not a
+// hand-rolled router.Use call. Most callers should use
+// WithBearerValidator/WithCognito/WithApiKeyValidator instead; this is the
+// escape hatch for when none of those apply. Takes precedence over any
+// bearer/API-key validator also configured on this builder.
+func (b *AuthenticationBuilder) WithAuthenticator(a Authenticator) *AuthenticationBuilder {
+	b.authenticator = a
+	return b
+}
+
 // WithExtractorConfig sets custom extraction options.
 func (b *AuthenticationBuilder) WithExtractorConfig(cfg ExtractorConfig) *AuthenticationBuilder {
 	b.extractorConfig = &cfg
@@ -198,10 +231,18 @@ func (b *AuthenticationBuilder) WithOption(opts ...Option) *AuthenticationBuilde
 	return b
 }
 
-// Build creates the Authenticator (CompositeAuthenticator).
+// Build creates the Authenticator (CompositeAuthenticator, or whatever
+// WithAuthenticator supplied).
 func (b *AuthenticationBuilder) Build() (Authenticator, error) {
 	if b.err != nil {
 		return nil, b.err
+	}
+
+	if b.authenticator != nil {
+		if b.onAuthenticate == nil {
+			return b.authenticator, nil
+		}
+		return &hookedAuthenticator{inner: b.authenticator, onAuthenticate: b.onAuthenticate}, nil
 	}
 
 	if b.bearerValidator == nil && b.apiKeyValidator == nil {
@@ -236,4 +277,22 @@ func (b *AuthenticationBuilder) BuildMiddleware() (gin.HandlerFunc, error) {
 	}
 
 	return UseAuthentication(auth, opts...), nil
+}
+
+// hookedAuthenticator decorates an Authenticator supplied via
+// AuthenticationBuilder.WithAuthenticator so WithOnAuthenticate's metrics
+// hook still fires uniformly -- matching CompositeAuthenticator.Authenticate's
+// own reporting. CredentialType is always empty here: a
+// WithAuthenticator-supplied Authenticator does its own thing entirely, with
+// no CredentialExtractor-recognized bearer/apikey distinction to report.
+type hookedAuthenticator struct {
+	inner          Authenticator
+	onAuthenticate func(context.Context, AuthEvent)
+}
+
+func (h *hookedAuthenticator) Authenticate(c *gin.Context) (*principal.Principal, error) {
+	start := time.Now()
+	p, err := h.inner.Authenticate(c)
+	h.onAuthenticate(c.Request.Context(), AuthEvent{Success: err == nil, Duration: time.Since(start)})
+	return p, err
 }

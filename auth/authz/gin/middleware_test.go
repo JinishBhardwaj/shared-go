@@ -28,9 +28,10 @@ func setupMiddlewareTestRouter(t *testing.T) (*gin.Engine, *authz.PolicyEngine) 
 		userHeader := c.GetHeader("X-User")
 		if userHeader != "" {
 			ginprincipal.Set(c, &principal.Principal{
-				Subject: userHeader,
-				Method:  principal.AuthMethodAuthCodePKCE,
-				Roles:   []string{roleHeader},
+				Subject:     userHeader,
+				Method:      principal.AuthMethodAuthCodePKCE,
+				UserPresent: true,
+				Roles:       []string{roleHeader},
 			})
 		}
 		c.Next()
