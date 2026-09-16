@@ -24,6 +24,19 @@ type PermissionReader interface {
 	// can read that context and scope its own query by it. This is the only
 	// place tenant/account scoping happens; PermissionRule and Resource
 	// carry no such field, and Matches performs no such comparison.
+	//
+	// A tenant-scoped implementation must also include platform-wide rules
+	// that apply regardless of tenant context -- e.g. an internal/staff
+	// principal (no tenant/account in Metadata at all, such as one
+	// federated via Google SAML through Cognito, see
+	// authn.CognitoClaimsNormalizer) still needs its grants returned even
+	// though it has no account to scope by. Concretely, a SQL-backed
+	// implementation must match "tenant_id = <p's tenant> OR tenant_id IS
+	// NULL", not just "tenant_id = <p's tenant>" -- the latter silently
+	// drops every platform-wide grant. There is no reference Postgres
+	// implementation in this package to copy this from (removed; see
+	// authz/parc.go's package history) -- this is the contract the next one
+	// must satisfy.
 	GetPermissions(ctx context.Context, p *principal.Principal) (*PrincipalPermissions, error)
 }
 
@@ -36,6 +49,13 @@ type PermissionWriter interface {
 	// as PermissionReader.GetPermissions: an implementation that scopes
 	// rules by account/tenant needs to read that context from p (e.g.
 	// p.Metadata) to know which account's record to write to.
+	//
+	// A rule with no tenant/account scope at all is a platform-wide grant
+	// (see PermissionReader.GetPermissions) -- the highest-blast-radius rule
+	// shape a tenant-scoped implementation can express, since it applies
+	// regardless of tenant context. This interface does not gate who may
+	// call GrantPermission with such a rule; a caller wiring this up behind
+	// an admin API must restrict that itself.
 	GrantPermission(ctx context.Context, p *principal.Principal, rule PermissionRule) error
 
 	// RevokeAll removes all permissions for a principal.
