@@ -217,7 +217,7 @@ func TestPARCHandler_CachingAndInstantRevocation(t *testing.T) {
 
 	// Grant permission in repo
 	principalID := "user_42"
-	_ = repo.GrantPermission(ctx, principalID, PermissionRule{
+	_ = repo.GrantPermission(ctx, &principal.Principal{Subject: principalID}, PermissionRule{
 		ActionPattern:     "read",
 		ResourceType:      "order",
 		ResourceIDPattern: "*",
@@ -259,7 +259,7 @@ func TestPARCHandler_CachingAndInstantRevocation(t *testing.T) {
 	}
 
 	// 2. Revoke permissions in DB AND publish instant revocation event
-	_ = repo.RevokeAll(ctx, principalID)
+	_ = repo.RevokeAll(ctx, &principal.Principal{Subject: principalID})
 	_ = memCache.Delete(ctx, cacheKey) // Immediate cache eviction!
 	time.Sleep(20 * time.Millisecond)
 
@@ -332,7 +332,7 @@ func TestPolicyEngine_StackedPARCAndCustomRequirement_MapsPrincipalOnce(t *testi
 
 	repo := NewMemoryPermissionRepository()
 	principalID := "user_stack"
-	_ = repo.GrantPermission(ctx, principalID, PermissionRule{
+	_ = repo.GrantPermission(ctx, &principal.Principal{Subject: principalID}, PermissionRule{
 		ActionPattern:     "read",
 		ResourceType:      "order",
 		ResourceIDPattern: "*",

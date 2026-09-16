@@ -90,7 +90,7 @@ func main() {
 	// PARC repository granting alice permission to read order "order-1"
 	// specifically, for a fine-grained per-resource check.
 	permissions := authz.NewMemoryPermissionRepository()
-	_ = permissions.GrantPermission(context.Background(), "alice", authz.PermissionRule{
+	_ = permissions.GrantPermission(context.Background(), &principal.Principal{Subject: "alice"}, authz.PermissionRule{
 		ActionPattern:     "read",
 		ResourceType:      "order",
 		ResourceIDPattern: "order-1",

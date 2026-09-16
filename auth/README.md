@@ -68,7 +68,7 @@ authentication := authngin.NewBuilder().
 // permission to read order "order-1" specifically, for a fine-grained
 // per-resource check.
 permissions := authz.NewMemoryPermissionRepository()
-if err := permissions.GrantPermission(context.Background(), "alice", authz.PermissionRule{
+if err := permissions.GrantPermission(context.Background(), &principal.Principal{Subject: "alice"}, authz.PermissionRule{
 	ActionPattern:     "read",
 	ResourceType:      "order",
 	ResourceIDPattern: "order-1",

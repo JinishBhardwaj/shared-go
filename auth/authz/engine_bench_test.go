@@ -60,7 +60,7 @@ func BenchmarkPARCHandler_Handle_WarmCache(b *testing.B) {
 	repo := NewMemoryPermissionRepository()
 
 	principalID := "bench-principal"
-	if err := repo.GrantPermission(ctx, principalID, PermissionRule{
+	if err := repo.GrantPermission(ctx, &principal.Principal{Subject: principalID}, PermissionRule{
 		ActionPattern:     "read",
 		ResourceType:      "report",
 		ResourceIDPattern: "*",

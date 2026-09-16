@@ -164,7 +164,7 @@ func TestAuthorizationBuilder_WithCacheOutcomeHook_FiresOnRealPARCHandle(t *test
 
 	repo := authz.NewMemoryPermissionRepository()
 	ctx := context.Background()
-	if err := repo.GrantPermission(ctx, "john_doe", authz.PermissionRule{
+	if err := repo.GrantPermission(ctx, &principal.Principal{Subject: "john_doe"}, authz.PermissionRule{
 		ActionPattern:     "read",
 		ResourceType:      "report",
 		ResourceIDPattern: "rep_public_*",

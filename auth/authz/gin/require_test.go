@@ -22,7 +22,7 @@ func TestGinGuard_RequirePolicyAndPARC(t *testing.T) {
 	repo := authz.NewMemoryPermissionRepository()
 	ctx := context.Background()
 
-	_ = repo.GrantPermission(ctx, "john_doe", authz.PermissionRule{
+	_ = repo.GrantPermission(ctx, &principal.Principal{Subject: "john_doe"}, authz.PermissionRule{
 		ActionPattern:     "read",
 		ResourceType:      "report",
 		ResourceIDPattern: "rep_public_*",
@@ -98,10 +98,10 @@ type leakyPermissionRepository struct{}
 func (leakyPermissionRepository) GetPermissions(ctx context.Context, p *principal.Principal) (*authz.PrincipalPermissions, error) {
 	return nil, errors.New(`pq: password authentication failed for user "svc_role" secret=hunter2` + "\r\nX-Injected: evil")
 }
-func (leakyPermissionRepository) GrantPermission(ctx context.Context, principalID string, rule authz.PermissionRule) error {
+func (leakyPermissionRepository) GrantPermission(ctx context.Context, p *principal.Principal, rule authz.PermissionRule) error {
 	return nil
 }
-func (leakyPermissionRepository) RevokeAll(ctx context.Context, principalID string) error {
+func (leakyPermissionRepository) RevokeAll(ctx context.Context, p *principal.Principal) error {
 	return nil
 }
 

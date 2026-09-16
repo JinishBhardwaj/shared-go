@@ -59,11 +59,11 @@ func (r *countingRepo) GetPermissions(ctx context.Context, p *principal.Principa
 	return cp, nil
 }
 
-func (r *countingRepo) GrantPermission(ctx context.Context, principalID string, rule PermissionRule) error {
+func (r *countingRepo) GrantPermission(ctx context.Context, p *principal.Principal, rule PermissionRule) error {
 	return errors.New("countingRepo: GrantPermission not supported")
 }
 
-func (r *countingRepo) RevokeAll(ctx context.Context, principalID string) error {
+func (r *countingRepo) RevokeAll(ctx context.Context, p *principal.Principal) error {
 	return nil
 }
 

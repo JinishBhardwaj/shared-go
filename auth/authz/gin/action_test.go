@@ -30,7 +30,7 @@ func TestRequirePolicyGuard_UsesLogicalActionNotRawVerb(t *testing.T) {
 
 	newRouter := func(rule authz.PermissionRule) *gin.Engine {
 		repo := authz.NewMemoryPermissionRepository()
-		_ = repo.GrantPermission(context.Background(), "creator_1", rule)
+		_ = repo.GrantPermission(context.Background(), &principal.Principal{Subject: "creator_1"}, rule)
 
 		parcHandler, _ := authz.NewPARCHandler(authz.PARCHandlerConfig{Repository: repo})
 		engine := authz.NewPolicyEngine(parcHandler)

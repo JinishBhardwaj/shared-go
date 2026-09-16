@@ -32,10 +32,14 @@ type PermissionReader interface {
 // hot path.
 type PermissionWriter interface {
 	// GrantPermission appends a permission rule to the principal's record.
-	GrantPermission(ctx context.Context, principalID string, rule PermissionRule) error
+	// Takes the full Principal, not just its Subject, for the same reason
+	// as PermissionReader.GetPermissions: an implementation that scopes
+	// rules by account/tenant needs to read that context from p (e.g.
+	// p.Metadata) to know which account's record to write to.
+	GrantPermission(ctx context.Context, p *principal.Principal, rule PermissionRule) error
 
 	// RevokeAll removes all permissions for a principal.
-	RevokeAll(ctx context.Context, principalID string) error
+	RevokeAll(ctx context.Context, p *principal.Principal) error
 }
 
 // PermissionRepository abstracts access to permission records in the
@@ -89,17 +93,17 @@ func (r *MemoryPermissionRepository) GetPermissions(ctx context.Context, p *prin
 }
 
 // GrantPermission adds a rule to a principal's bundle.
-func (r *MemoryPermissionRepository) GrantPermission(ctx context.Context, principalID string, rule PermissionRule) error {
+func (r *MemoryPermissionRepository) GrantPermission(ctx context.Context, p *principal.Principal, rule PermissionRule) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
-	bundle, exists := r.permissions[principalID]
+	bundle, exists := r.permissions[p.Subject]
 	if !exists {
 		bundle = &PrincipalPermissions{
-			PrincipalID: principalID,
+			PrincipalID: p.Subject,
 			Rules:       nil,
 		}
-		r.permissions[principalID] = bundle
+		r.permissions[p.Subject] = bundle
 	}
 
 	bundle.Rules = append(bundle.Rules, rule)
@@ -107,9 +111,9 @@ func (r *MemoryPermissionRepository) GrantPermission(ctx context.Context, princi
 }
 
 // RevokeAll clears all permission rules for the principal.
-func (r *MemoryPermissionRepository) RevokeAll(ctx context.Context, principalID string) error {
+func (r *MemoryPermissionRepository) RevokeAll(ctx context.Context, p *principal.Principal) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	delete(r.permissions, principalID)
+	delete(r.permissions, p.Subject)
 	return nil
 }
