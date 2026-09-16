@@ -3,7 +3,6 @@ package authtest
 import (
 	"errors"
 
-	authngin "github.com/JinishBhardwaj/shared-go/auth/authn/gin"
 	"github.com/JinishBhardwaj/shared-go/auth/principal"
 	"github.com/gin-gonic/gin"
 )
@@ -11,8 +10,10 @@ import (
 // ErrNilPrincipal is returned by NewNoopAuthenticator when p is nil.
 var ErrNilPrincipal = errors.New("authtest: NewNoopAuthenticator requires a non-nil principal")
 
-// NoopAuthenticator implements authngin.Authenticator by returning a fixed
-// Principal for every request, performing no credential extraction or
+// NoopAuthenticator implements authn/gin's Authenticator interface (by
+// structural typing -- not imported here, since authn/gin's own tests import
+// this package, and importing it back would create a cycle) by returning a
+// fixed Principal for every request, performing no credential extraction or
 // token/key validation at all. It exists for local/dev-mode bootstrapping
 // where standing up even MockOAuthProvider's mock IdP flow is unnecessary
 // friction.
@@ -23,8 +24,6 @@ var ErrNilPrincipal = errors.New("authtest: NewNoopAuthenticator requires a non-
 type NoopAuthenticator struct {
 	principal *principal.Principal
 }
-
-var _ authngin.Authenticator = (*NoopAuthenticator)(nil)
 
 // NewNoopAuthenticator returns a NoopAuthenticator that authenticates every
 // request as p. p must be non-nil: authz.PolicyEngine.Evaluate denies on a

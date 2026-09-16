@@ -95,7 +95,7 @@ func TestGinGuard_RequirePolicyAndPARC(t *testing.T) {
 // double-quote, and a CRLF sequence attempting header injection.
 type leakyPermissionRepository struct{}
 
-func (leakyPermissionRepository) GetPermissions(ctx context.Context, principalID string) (*authz.PrincipalPermissions, error) {
+func (leakyPermissionRepository) GetPermissions(ctx context.Context, p *principal.Principal) (*authz.PrincipalPermissions, error) {
 	return nil, errors.New(`pq: password authentication failed for user "svc_role" secret=hunter2` + "\r\nX-Injected: evil")
 }
 func (leakyPermissionRepository) GrantPermission(ctx context.Context, principalID string, rule authz.PermissionRule) error {

@@ -25,7 +25,7 @@ type countingRepo struct {
 	perms *PrincipalPermissions
 }
 
-func (r *countingRepo) GetPermissions(ctx context.Context, principalID string) (*PrincipalPermissions, error) {
+func (r *countingRepo) GetPermissions(ctx context.Context, p *principal.Principal) (*PrincipalPermissions, error) {
 	r.mu.Lock()
 	r.calls++
 	delay := r.delay

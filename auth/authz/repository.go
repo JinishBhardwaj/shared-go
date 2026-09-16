@@ -4,6 +4,8 @@ import (
 	"context"
 	"errors"
 	"sync"
+
+	"github.com/JinishBhardwaj/shared-go/auth/principal"
 )
 
 var (
@@ -15,8 +17,14 @@ var (
 // PermissionRepository into reader/writer -- the hot path needs only
 // GetPermissions").
 type PermissionReader interface {
-	// GetPermissions retrieves the full bundle of rules for a given principal.
-	GetPermissions(ctx context.Context, principalID string) (*PrincipalPermissions, error)
+	// GetPermissions retrieves the full bundle of rules for the given
+	// principal, already scoped to whatever account/tenant context the
+	// caller populated onto p (e.g. p.Metadata["tenant_customer_id"]) --
+	// takes the full Principal, not just its Subject, so an implementation
+	// can read that context and scope its own query by it. This is the only
+	// place tenant/account scoping happens; PermissionRule and Resource
+	// carry no such field, and Matches performs no such comparison.
+	GetPermissions(ctx context.Context, p *principal.Principal) (*PrincipalPermissions, error)
 }
 
 // PermissionWriter is the administrative subset of PermissionRepository --
@@ -52,15 +60,20 @@ func NewMemoryPermissionRepository() *MemoryPermissionRepository {
 	}
 }
 
-// GetPermissions returns the permission bundle or an empty bundle if none exists.
-func (r *MemoryPermissionRepository) GetPermissions(ctx context.Context, principalID string) (*PrincipalPermissions, error) {
+// GetPermissions returns the permission bundle or an empty bundle if none
+// exists. MemoryPermissionRepository is a single-account test/reference
+// implementation -- it keys purely by p.Subject and does not itself
+// demonstrate account-scoped fetching; a real, multi-account-aware
+// implementation would additionally read p.Metadata for the caller's active
+// account and scope its query by it.
+func (r *MemoryPermissionRepository) GetPermissions(ctx context.Context, p *principal.Principal) (*PrincipalPermissions, error) {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
 
-	bundle, exists := r.permissions[principalID]
+	bundle, exists := r.permissions[p.Subject]
 	if !exists {
 		return &PrincipalPermissions{
-			PrincipalID: principalID,
+			PrincipalID: p.Subject,
 			Rules:       nil,
 		}, nil
 	}
@@ -70,7 +83,7 @@ func (r *MemoryPermissionRepository) GetPermissions(ctx context.Context, princip
 	copy(rulesCopy, bundle.Rules)
 
 	return &PrincipalPermissions{
-		PrincipalID: principalID,
+		PrincipalID: p.Subject,
 		Rules:       rulesCopy,
 	}, nil
 }

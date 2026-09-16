@@ -32,10 +32,17 @@ type Action struct {
 }
 
 // Resource represents the domain entity being accessed.
+//
+// Deliberately has no TenantID/account field: which account a request is
+// scoped to is a property of the Principal asking (who), not of the
+// Resource being acted on (what) -- see PermissionRule's doc comment.
+// Whether a specific resource instance actually belongs to the caller's
+// account is a data-access-layer concern (the application's own query
+// scoping), not something a generic PARC engine can check for arbitrary
+// resource types.
 type Resource struct {
 	Type       string         `json:"type"`                 // e.g. "report", "user", "billing", "document"
 	ID         string         `json:"id"`                   // e.g. "rep_1234", "usr_999", or "*"
-	TenantID   string         `json:"tenant_id,omitempty"`  // multi-tenant isolation ID
 	Attributes map[string]any `json:"attributes,omitempty"` // entity attributes for ABAC rules
 }
 
@@ -61,12 +68,21 @@ type Decision struct {
 	Reason  string `json:"reason,omitempty"`
 }
 
-// PermissionRule defines a fine-grained authorization rule stored in the local database.
+// PermissionRule defines a fine-grained authorization rule stored in the
+// local database.
+//
+// Deliberately has no TenantID/account field, for the same reason as
+// Resource: which account a rule belongs to is resolved by
+// PermissionRepository.GetPermissions before a rule ever reaches here (it
+// receives the full Principal, including whatever account/tenant
+// information the application populated onto it, and returns only the
+// rules already scoped to that account) -- exactly the same principle
+// already used for group-derived rules. By the time Matches runs, scoping
+// has already happened; it only ever needs to compare action/resource.
 type PermissionRule struct {
 	ActionPattern     string `json:"action_pattern"`      // "read", "write", "reports:*", "*"
 	ResourceType      string `json:"resource_type"`       // "report", "order", "*"
 	ResourceIDPattern string `json:"resource_id_pattern"` // "rep_*", "123", "*"
-	TenantID          string `json:"tenant_id,omitempty"` // empty or "*" means all tenants
 	Effect            Effect `json:"effect"`              // "permit" or "deny"
 }
 
@@ -91,17 +107,6 @@ func (r *PermissionRule) Matches(req Request) bool {
 	// 3. Check Resource ID
 	if !matchGlob(r.ResourceIDPattern, req.Resource.ID) {
 		return false
-	}
-
-	// 4. Check Tenant ID if the rule pins one. Tier 0 #1: an empty rule
-	// TenantID (or the literal "*") means "any tenant", but once a rule DOES
-	// pin a tenant, a request whose Resource.TenantID is empty must be
-	// treated as "tenant unknown/omitted" -- never as "any tenant is fine".
-	// Fail closed: only an exact tenant match satisfies a pinned rule.
-	if r.TenantID != "" && r.TenantID != "*" {
-		if req.Resource.TenantID != r.TenantID {
-			return false
-		}
 	}
 
 	return true
@@ -222,11 +227,11 @@ type compiledRule struct {
 	resourceIDPattern compiledPattern
 }
 
-// matches reproduces PermissionRule.Matches's four checks exactly (action,
-// resource type, resource ID, tenant), in a different but outcome-
-// equivalent order, using the precompiled patterns for action/resource-ID
-// and skipping the resource-type check when the caller (index-bucket
-// iteration in Evaluate) has already guaranteed it via bucket membership.
+// matches reproduces PermissionRule.Matches's three checks exactly (action,
+// resource type, resource ID), in a different but outcome-equivalent order,
+// using the precompiled patterns for action/resource-ID and skipping the
+// resource-type check when the caller (index-bucket iteration in Evaluate)
+// has already guaranteed it via bucket membership.
 func (cr *compiledRule) matches(req Request, resourceTypeConfirmed bool) bool {
 	if !cr.actionPattern.match(req.Action.Name) {
 		return false
@@ -236,12 +241,6 @@ func (cr *compiledRule) matches(req Request, resourceTypeConfirmed bool) bool {
 	}
 	if !cr.resourceIDPattern.match(req.Resource.ID) {
 		return false
-	}
-	// Tier 0 #1: identical tenant fail-closed logic to PermissionRule.Matches.
-	if cr.rule.TenantID != "" && cr.rule.TenantID != "*" {
-		if req.Resource.TenantID != cr.rule.TenantID {
-			return false
-		}
 	}
 	return true
 }

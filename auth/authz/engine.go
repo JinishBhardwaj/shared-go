@@ -301,6 +301,21 @@ type PARCHandlerConfig struct {
 	// which branch the permission lookup took (see CacheOutcome). Purely
 	// observational -- see CacheOutcome's doc comment.
 	OnCacheOutcome func(CacheOutcome)
+
+	// CacheKeyFunc computes the cache (and in-flight-fetch dedup) key for a
+	// principal. Defaults to "perm:"+p.Subject.
+	//
+	// Override this if GetPermissions' result can vary for the same
+	// p.Subject depending on some other attribute of p (e.g. a principal
+	// acting on behalf of one of several accounts, keyed via
+	// p.Metadata["tenant_customer_id"]) -- otherwise two fetches for the
+	// same Subject but a different active account would collide on the same
+	// cache entry, and Handle would silently serve one account's permissions
+	// for a request actually scoped to another. authz itself has no concept
+	// of "account"/"tenant" (see PermissionRule's doc comment) and so cannot
+	// default this correctly for every caller; it can only default to the
+	// common single-account-per-principal case.
+	CacheKeyFunc func(p *principal.Principal) string
 }
 
 // PARCHandler evaluates PARCRequirement with high-performance caching (10k+ RPS).
@@ -311,6 +326,7 @@ type PARCHandler struct {
 	staleTTL       time.Duration
 	repoTimeout    time.Duration
 	onCacheOutcome func(CacheOutcome)
+	cacheKeyFunc   func(p *principal.Principal) string
 
 	// breaker and group are internal (not exported in PARCHandlerConfig)
 	// deliberately: exposing *gobreaker.CircuitBreaker[T] in authz's public
@@ -356,6 +372,10 @@ func NewPARCHandler(cfg PARCHandlerConfig) (*PARCHandler, error) {
 	if repoTimeout <= 0 {
 		repoTimeout = 50 * time.Millisecond
 	}
+	cacheKeyFunc := cfg.CacheKeyFunc
+	if cacheKeyFunc == nil {
+		cacheKeyFunc = func(p *principal.Principal) string { return "perm:" + p.Subject }
+	}
 
 	return &PARCHandler{
 		repo:           cfg.Repository,
@@ -364,6 +384,7 @@ func NewPARCHandler(cfg PARCHandlerConfig) (*PARCHandler, error) {
 		staleTTL:       staleTTL,
 		repoTimeout:    repoTimeout,
 		onCacheOutcome: cfg.OnCacheOutcome,
+		cacheKeyFunc:   cacheKeyFunc,
 		breaker:        gobreaker.NewCircuitBreaker[*PrincipalPermissions](gobreaker.Settings{Name: "authz-permission-repository"}),
 	}, nil
 }
@@ -376,12 +397,15 @@ func (h *PARCHandler) reportCacheOutcome(o CacheOutcome) {
 	}
 }
 
-// refreshPermissions fetches principalID's permission bundle from the
-// repository, protected by a per-PARCHandler circuit breaker and a
-// per-call context deadline (h.repoTimeout), and collapses concurrent
-// refreshes for the same principalID into a single repository call
-// (Tier 3 singleflight -- a cache miss/stale-refresh on a hot principal no
-// longer fans every concurrent caller out to the repository individually).
+// refreshPermissions fetches p's permission bundle from the repository,
+// protected by a per-PARCHandler circuit breaker and a per-call context
+// deadline (h.repoTimeout), and collapses concurrent refreshes sharing the
+// same cacheKey into a single repository call (Tier 3 singleflight -- a
+// cache miss/stale-refresh on a hot principal no longer fans every
+// concurrent caller out to the repository individually). Keyed on cacheKey,
+// not p.Subject, so two fetches for the same Subject but a different
+// CacheKeyFunc-distinguished context (e.g. a different active account) are
+// never incorrectly collapsed into one shared fetch.
 //
 // Deliberately uses context.Background() (bounded by h.repoTimeout), NOT the
 // calling goroutine's own inbound ctx, as the base for the repository call:
@@ -400,13 +424,13 @@ func (h *PARCHandler) reportCacheOutcome(o CacheOutcome) {
 // surface identically as an error here, on purpose: none of them may ever
 // be special-cased into treating the caller as authorized) the error is
 // returned and the cache is left untouched.
-func (h *PARCHandler) refreshPermissions(cacheKey, principalID string) (*PrincipalPermissions, error) {
-	v, err, _ := h.group.Do(principalID, func() (any, error) {
+func (h *PARCHandler) refreshPermissions(cacheKey string, p *principal.Principal) (*PrincipalPermissions, error) {
+	v, err, _ := h.group.Do(cacheKey, func() (any, error) {
 		cctx, cancel := context.WithTimeout(context.Background(), h.repoTimeout)
 		defer cancel()
 
 		perms, err := h.breaker.Execute(func() (*PrincipalPermissions, error) {
-			return h.repo.GetPermissions(cctx, principalID)
+			return h.repo.GetPermissions(cctx, p)
 		})
 		if err != nil {
 			return nil, err
@@ -429,7 +453,7 @@ func (h *PARCHandler) Handle(ctx context.Context, p *principal.Principal, req Re
 		return false, nil
 	}
 
-	cacheKey := "perm:" + p.Subject
+	cacheKey := h.cacheKeyFunc(p)
 
 	// 1. Check cache (L1 in-memory check takes ~30-50 nanoseconds). A miss
 	// is (nil, false, nil), never an error; a non-nil error here is a real
@@ -442,7 +466,7 @@ func (h *PARCHandler) Handle(ctx context.Context, p *principal.Principal, req Re
 	fresh := haveCached && time.Since(perms.FetchedAt) <= h.grantTTL
 
 	if !fresh {
-		refreshed, err := h.refreshPermissions(cacheKey, p.Subject)
+		refreshed, err := h.refreshPermissions(cacheKey, p)
 		switch {
 		case err == nil:
 			perms = refreshed
