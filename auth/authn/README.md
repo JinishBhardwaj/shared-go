@@ -48,6 +48,8 @@ import (
 	"net/http"
 
 	"github.com/JinishBhardwaj/shared-go/authn"
+	"github.com/JinishBhardwaj/shared-go/authn/mapping"
+	"github.com/JinishBhardwaj/shared-go/authn/oidc"
 	"github.com/gin-gonic/gin"
 )
 
@@ -55,10 +57,10 @@ func main() {
 	r := gin.Default()
 
 	// 1. Configure OIDC Bearer Validator (Cognito, Keycloak, Okta, etc.)
-	oidcValidator, err := authn.NewOIDCValidator(context.Background(), authn.OIDCValidatorConfig{
+	oidcValidator, err := oidc.NewOIDCValidator(context.Background(), oidc.OIDCValidatorConfig{
 		IssuerURL:  "https://cognito-idp.us-east-1.amazonaws.com/us-east-1_example",
 		ExpectedClientID: "your-client-id",
-		Normalizer: authn.NewCognitoClaimsNormalizer(),
+		Normalizer: mapping.NewCognitoClaimsNormalizer(),
 	})
 	if err != nil {
 		panic(err)

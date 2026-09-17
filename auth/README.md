@@ -18,7 +18,11 @@ any authorization check runs.
 
 | Package | What it's for |
 |---|---|
-| `authn` | Core authentication: `BearerTokenValidator`/`KeyValidator` interfaces, OIDC/JWT/API-key validators, issuer registry, claims normalization. |
+| `authn` | Protocol-agnostic authn core: sentinel errors, `ClaimsNormalizer`/`AudienceValidator` contracts, `TypEnforcementMode`, `IssuerRegistry`, `CachingValidator`. |
+| `authn/oidc` | Dynamic OIDC discovery + JWKS-verified validation (`OIDCValidator`), JWKS hardening (kid gate), and `IDTokenGroupsEnricher`. |
+| `authn/bearer` | Static-key/JWKS-keyfunc JWT bearer validation (`JWTValidator`). |
+| `authn/mapping` | IdP-specific claims-to-`Principal` mapping (`StandardOIDCNormalizer`, `CognitoClaimsNormalizer`) and group/role extraction strategies. |
+| `authn/apikey` | API key storage (`MemoryAPIKeyStore`) and validation (`APIKeyValidator`). |
 | `authn/gin` | Gin wiring for authn: `AuthenticationBuilder`, `UseAuthentication` middleware, credential extraction from headers. |
 | `authz` | Core authorization: `Policy`/`PolicyEngine`, PARC evaluation, requirement handlers (role/scope/method), `PermissionRepository`. |
 | `authz/gin` | Gin wiring for authz: `AuthorizationBuilder`, the single `Require(opts...)` route guard, route-param resource extraction. |

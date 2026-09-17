@@ -1,4 +1,4 @@
-package authn
+package oidc
 
 import (
 	"context"
@@ -12,6 +12,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/JinishBhardwaj/shared-go/auth/authn/mapping"
 	"github.com/golang-jwt/jwt/v5"
 )
 
@@ -65,7 +66,7 @@ func TestOIDCValidator_WithMockOIDCServer(t *testing.T) {
 	validator, err := NewOIDCValidator(ctx, OIDCValidatorConfig{
 		IssuerURL:         server.URL,
 		SkipClientIDCheck: true,
-		Normalizer:        NewStandardOIDCNormalizer(),
+		Normalizer:        mapping.NewStandardOIDCNormalizer(),
 	})
 	if err != nil {
 		t.Fatalf("failed to initialize OIDCValidator: %v", err)
@@ -180,7 +181,7 @@ func TestOIDCValidator_AllowedAudiences(t *testing.T) {
 	validator, err := NewOIDCValidator(ctx, OIDCValidatorConfig{
 		IssuerURL:        server.URL,
 		AllowedAudiences: []string{"app-client-a", "app-client-b"},
-		Normalizer:       NewStandardOIDCNormalizer(),
+		Normalizer:       mapping.NewStandardOIDCNormalizer(),
 	})
 	if err != nil {
 		t.Fatalf("failed to initialize OIDCValidator: %v", err)
@@ -226,7 +227,7 @@ func TestOIDCValidator_NoAudienceConfigured_StillWorks(t *testing.T) {
 
 	validator, err := NewOIDCValidator(ctx, OIDCValidatorConfig{
 		IssuerURL:  server.URL,
-		Normalizer: NewStandardOIDCNormalizer(),
+		Normalizer: mapping.NewStandardOIDCNormalizer(),
 	})
 	if err != nil {
 		t.Fatalf("failed to initialize OIDCValidator: %v", err)

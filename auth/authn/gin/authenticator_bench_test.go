@@ -6,7 +6,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/JinishBhardwaj/shared-go/auth/authn"
+	"github.com/JinishBhardwaj/shared-go/auth/authn/bearer"
 	"github.com/gin-gonic/gin"
 	"github.com/golang-jwt/jwt/v5"
 )
@@ -23,7 +23,7 @@ import (
 func BenchmarkCompositeAuthenticator_Authenticate_Bearer(b *testing.B) {
 	hmacKey := []byte("bench-hmac-secret-key")
 
-	validator, err := authn.NewJWTValidator(authn.JWTValidatorConfig{
+	validator, err := bearer.NewJWTValidator(bearer.JWTValidatorConfig{
 		KeyFunc: func(token *jwt.Token) (any, error) {
 			return hmacKey, nil
 		},

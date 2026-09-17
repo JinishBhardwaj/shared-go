@@ -7,6 +7,8 @@ import (
 	"time"
 
 	"github.com/JinishBhardwaj/shared-go/auth/authn"
+	"github.com/JinishBhardwaj/shared-go/auth/authn/mapping"
+	"github.com/JinishBhardwaj/shared-go/auth/authn/oidc"
 	"github.com/JinishBhardwaj/shared-go/auth/principal"
 	"github.com/gin-gonic/gin"
 )
@@ -99,7 +101,7 @@ func (b *AuthenticationBuilder) WithCognito(ctx context.Context, opts CognitoOpt
 		issuerURL = fmt.Sprintf("https://cognito-idp.%s.amazonaws.com/%s", opts.Region, opts.UserPoolID)
 	}
 
-	validator, err := authn.NewOIDCValidator(ctx, authn.OIDCValidatorConfig{
+	validator, err := oidc.NewOIDCValidator(ctx, oidc.OIDCValidatorConfig{
 		IssuerURL:                issuerURL,
 		ExpectedClientID:         opts.ClientID,
 		AllowedAudiences:         opts.AllowedAudiences,
@@ -107,7 +109,7 @@ func (b *AuthenticationBuilder) WithCognito(ctx context.Context, opts CognitoOpt
 		AudienceValidatorTimeout: opts.AudienceValidatorTimeout,
 		SkipClientIDCheck:        opts.SkipClientIDCheck,
 		SupportedSigningAlgs:     []string{"RS256"},
-		Normalizer:               authn.NewCognitoClaimsNormalizer(),
+		Normalizer:               mapping.NewCognitoClaimsNormalizer(),
 		CustomKeySetURL:          opts.CustomKeySetURL,
 		TypEnforcement:           opts.TypEnforcement,
 	})

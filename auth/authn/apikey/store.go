@@ -1,4 +1,6 @@
-package apikeys
+// Package apikey provides API key storage and validation, mapping a raw key
+// to a Principal.
+package apikey
 
 import (
 	"context"

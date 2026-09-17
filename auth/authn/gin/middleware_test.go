@@ -11,14 +11,15 @@ import (
 	"time"
 
 	"github.com/JinishBhardwaj/shared-go/auth/authn"
-	"github.com/JinishBhardwaj/shared-go/auth/authn/apikeys"
+	"github.com/JinishBhardwaj/shared-go/auth/authn/apikey"
+	"github.com/JinishBhardwaj/shared-go/auth/authn/bearer"
 	"github.com/JinishBhardwaj/shared-go/auth/authtest"
 	"github.com/JinishBhardwaj/shared-go/auth/principal"
 	ginprincipal "github.com/JinishBhardwaj/shared-go/auth/principal/gin"
 	"github.com/gin-gonic/gin"
 )
 
-func setupTestRouter(t *testing.T) (*gin.Engine, *authtest.MockOAuthProvider, *apikeys.MemoryAPIKeyStore, string) {
+func setupTestRouter(t *testing.T) (*gin.Engine, *authtest.MockOAuthProvider, *apikey.MemoryAPIKeyStore, string) {
 	t.Helper()
 	gin.SetMode(gin.TestMode)
 
@@ -27,13 +28,13 @@ func setupTestRouter(t *testing.T) (*gin.Engine, *authtest.MockOAuthProvider, *a
 		t.Fatalf("failed creating oauth provider: %v", err)
 	}
 
-	keyStore := apikeys.NewMemoryAPIKeyStore()
+	keyStore := apikey.NewMemoryAPIKeyStore()
 	sampleAPIKey, _, err := keyStore.CreateKey("dev_owner_1", "dev-cli", "Developer Key", []string{"read:reports"}, []string{"admin"}, 24*time.Hour)
 	if err != nil {
 		t.Fatalf("failed creating api key: %v", err)
 	}
 
-	jwtVal, err := authn.NewJWTValidator(authn.JWTValidatorConfig{
+	jwtVal, err := bearer.NewJWTValidator(bearer.JWTValidatorConfig{
 		KeyFunc:          provider.KeyFunc(),
 		ExpectedIssuer:   "https://auth.example.com",
 		ExpectedAudience: "https://api.example.com",
@@ -42,7 +43,7 @@ func setupTestRouter(t *testing.T) (*gin.Engine, *authtest.MockOAuthProvider, *a
 		t.Fatalf("failed creating jwt validator: %v", err)
 	}
 
-	apiKeyVal, err := authn.NewAPIKeyValidator(keyStore)
+	apiKeyVal, err := apikey.NewAPIKeyValidator(keyStore)
 	if err != nil {
 		t.Fatalf("failed creating apikey validator: %v", err)
 	}
@@ -331,13 +332,13 @@ func TestHandleAuthError_KnownErrorMapsToFixedCode(t *testing.T) {
 }
 
 func TestMiddleware_ClaimsTransformer(t *testing.T) {
-	keyStore := apikeys.NewMemoryAPIKeyStore()
+	keyStore := apikey.NewMemoryAPIKeyStore()
 	sampleKey, _, err := keyStore.CreateKey("owner-1", "client-1", "TestKey", []string{"read"}, []string{"user"}, 1*time.Hour)
 	if err != nil {
 		t.Fatalf("failed to create key: %v", err)
 	}
 
-	apiKeyVal, _ := authn.NewAPIKeyValidator(keyStore)
+	apiKeyVal, _ := apikey.NewAPIKeyValidator(keyStore)
 	composite := NewCompositeAuthenticator(CompositeAuthenticatorConfig{
 		APIKeyValidator: apiKeyVal,
 	})

@@ -8,7 +8,8 @@ import (
 	"strings"
 
 	"github.com/JinishBhardwaj/shared-go/auth/authn"
-	"github.com/JinishBhardwaj/shared-go/auth/authn/apikeys"
+	"github.com/JinishBhardwaj/shared-go/auth/authn/apikey"
+	"github.com/JinishBhardwaj/shared-go/auth/authn/oidc"
 	"github.com/JinishBhardwaj/shared-go/auth/principal"
 	ginprincipal "github.com/JinishBhardwaj/shared-go/auth/principal/gin"
 	"github.com/gin-gonic/gin"
@@ -30,7 +31,7 @@ type MiddlewareConfig struct {
 	errorHandler      ErrorHandler
 	claimsTransformer principal.ClaimsTransformer
 	idTokenHeader     string
-	idTokenEnricher   *authn.IDTokenGroupsEnricher
+	idTokenEnricher   *oidc.IDTokenGroupsEnricher
 }
 
 // Option configures the middleware.
@@ -74,13 +75,13 @@ func WithClaimsTransformation(transformation principal.ClaimsTransformation) Opt
 	return WithClaimsTransformer(transformation)
 }
 
-// WithIDTokenGroupsEnrichment registers an authn.IDTokenGroupsEnricher and
+// WithIDTokenGroupsEnrichment registers an oidc.IDTokenGroupsEnricher and
 // the request header it should read a second, non-bearer ID token from (e.g.
 // "X-Id-Token"). Runs once, right after successful authentication and before
 // any configured ClaimsTransformer, so a database-backed transformer sees the
 // enriched roles too. The header's token is never treated as a credential --
 // see IDTokenGroupsEnricher's doc comment.
-func WithIDTokenGroupsEnrichment(headerName string, enricher *authn.IDTokenGroupsEnricher) Option {
+func WithIDTokenGroupsEnrichment(headerName string, enricher *oidc.IDTokenGroupsEnricher) Option {
 	return func(cfg *MiddlewareConfig) {
 		cfg.idTokenHeader = headerName
 		cfg.idTokenEnricher = enricher
@@ -169,10 +170,10 @@ func handleAuthError(c *gin.Context, err error, cfg MiddlewareConfig) {
 	case errors.Is(err, ErrNoCredentialsFound):
 		errCode = rfc6750Unauthorized
 		errDesc = "No credentials provided"
-	case errors.Is(err, authn.ErrTokenExpired), errors.Is(err, apikeys.ErrAPIKeyExpired):
+	case errors.Is(err, authn.ErrTokenExpired), errors.Is(err, apikey.ErrAPIKeyExpired):
 		errCode = rfc6750InvalidToken
 		errDesc = "The credential has expired"
-	case errors.Is(err, apikeys.ErrAPIKeyRevoked):
+	case errors.Is(err, apikey.ErrAPIKeyRevoked):
 		errCode = rfc6750InvalidToken
 		errDesc = "The API key has been revoked"
 	case errors.Is(err, ErrMultipleCredTypes):

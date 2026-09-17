@@ -1,10 +1,11 @@
-package authn
+package oidc
 
 import (
 	"context"
 	"errors"
 	"testing"
 
+	"github.com/JinishBhardwaj/shared-go/auth/authn/mapping"
 	"github.com/JinishBhardwaj/shared-go/auth/principal"
 	"github.com/golang-jwt/jwt/v5"
 )
@@ -23,7 +24,7 @@ func TestIDTokenGroupsEnricher_MergesGroupsFromIDToken(t *testing.T) {
 		verifier: stubIDTokenVerifier{claims: jwt.MapClaims{
 			"custom:groups": "[domains-tcc-access, domains-iuxp-access]",
 		}},
-		extractors: []GroupsExtractor{NewCognitoCustomAttrListExtractor("custom:groups")},
+		extractors: []mapping.GroupsExtractor{mapping.NewCognitoCustomAttrListExtractor("custom:groups")},
 	}
 
 	p := &principal.Principal{Subject: "u1", Roles: []string{"grafana-stg-users"}}
@@ -46,7 +47,7 @@ func TestIDTokenGroupsEnricher_MergesGroupsFromIDToken(t *testing.T) {
 func TestIDTokenGroupsEnricher_VerificationFailureDegradesToNoOp(t *testing.T) {
 	enricher := &IDTokenGroupsEnricher{
 		verifier:   stubIDTokenVerifier{err: errors.New("boom: forged or expired id token")},
-		extractors: []GroupsExtractor{NewCognitoCustomAttrListExtractor("custom:groups")},
+		extractors: []mapping.GroupsExtractor{mapping.NewCognitoCustomAttrListExtractor("custom:groups")},
 	}
 
 	p := &principal.Principal{Subject: "u1", Roles: []string{"grafana-stg-users"}}

@@ -1,4 +1,4 @@
-package authn
+package bearer
 
 import (
 	"context"
@@ -7,6 +7,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/JinishBhardwaj/shared-go/auth/authn"
 	"github.com/JinishBhardwaj/shared-go/auth/principal"
 	"github.com/golang-jwt/jwt/v5"
 )
@@ -150,7 +151,7 @@ func TestJWTValidator_ValidationErrors(t *testing.T) {
 			"exp": time.Now().Add(-5 * time.Minute).Unix(),
 		})
 		_, err := validator.ValidateToken(context.Background(), token)
-		if err == nil || err != ErrTokenExpired {
+		if err == nil || err != authn.ErrTokenExpired {
 			t.Errorf("expected ErrTokenExpired, got %v", err)
 		}
 	})
@@ -177,7 +178,7 @@ func TestJWTValidator_ValidationErrors(t *testing.T) {
 			"exp": time.Now().Add(time.Hour).Unix(),
 		})
 		_, err := validator.ValidateToken(context.Background(), token)
-		if err == nil || err != ErrInvalidIssuer {
+		if err == nil || err != authn.ErrInvalidIssuer {
 			t.Errorf("expected ErrInvalidIssuer, got %v", err)
 		}
 	})
@@ -190,7 +191,7 @@ func TestJWTValidator_ValidationErrors(t *testing.T) {
 			"exp": time.Now().Add(time.Hour).Unix(),
 		})
 		_, err := validator.ValidateToken(context.Background(), token)
-		if err == nil || err != ErrInvalidAudience {
+		if err == nil || err != authn.ErrInvalidAudience {
 			t.Errorf("expected ErrInvalidAudience, got %v", err)
 		}
 	})

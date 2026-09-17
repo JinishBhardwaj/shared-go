@@ -1,9 +1,10 @@
-package authn
+package oidc
 
 import (
 	"context"
 	"log"
 
+	"github.com/JinishBhardwaj/shared-go/auth/authn/mapping"
 	"github.com/JinishBhardwaj/shared-go/auth/principal"
 	"github.com/golang-jwt/jwt/v5"
 )
@@ -23,24 +24,24 @@ type idTokenVerifier interface {
 // It never accepts the ID token as authentication proof: the token is
 // independently signature- and claims-verified (via the same verifier used
 // for the access token), its groups are extracted and filtered exactly as
-// CognitoClaimsNormalizer would, and only the resulting group names are
-// merged into the principal the real authentication step already produced.
-// A missing, invalid, or unverifiable ID token degrades enrichment, never
-// authentication: Enrich returns the principal unchanged rather than an
-// error, since the ID token is optional supplemental input, not a second
-// credential the caller must present correctly.
+// mapping.CognitoClaimsNormalizer would, and only the resulting group names
+// are merged into the principal the real authentication step already
+// produced. A missing, invalid, or unverifiable ID token degrades
+// enrichment, never authentication: Enrich returns the principal unchanged
+// rather than an error, since the ID token is optional supplemental input,
+// not a second credential the caller must present correctly.
 type IDTokenGroupsEnricher struct {
 	verifier   idTokenVerifier
-	extractors []GroupsExtractor
-	filters    []GroupFilter
+	extractors []mapping.GroupsExtractor
+	filters    []mapping.GroupFilter
 }
 
 // NewIDTokenGroupsEnricher builds an enricher backed by verifier (typically
 // the same *OIDCValidator used to authenticate the access token, against the
 // same Cognito user pool/app client, so its verifier already trusts the
 // right issuer and audience) and the given GroupsExtractors/GroupFilters
-// (e.g. NewCognitoCustomAttrListExtractor("custom:groups")).
-func NewIDTokenGroupsEnricher(verifier *OIDCValidator, extractors []GroupsExtractor, filters ...GroupFilter) *IDTokenGroupsEnricher {
+// (e.g. mapping.NewCognitoCustomAttrListExtractor("custom:groups")).
+func NewIDTokenGroupsEnricher(verifier *OIDCValidator, extractors []mapping.GroupsExtractor, filters ...mapping.GroupFilter) *IDTokenGroupsEnricher {
 	return &IDTokenGroupsEnricher{verifier: verifier, extractors: extractors, filters: filters}
 }
 
@@ -63,13 +64,13 @@ func (e *IDTokenGroupsEnricher) Enrich(ctx context.Context, idTokenStr string, p
 
 	var groups []string
 	for _, extractor := range e.extractors {
-		groups = mergeRoles(groups, filterGroups(extractor.ExtractGroups(claims), e.filters))
+		groups = mapping.MergeRoles(groups, mapping.FilterGroups(extractor.ExtractGroups(claims), e.filters))
 	}
 	if len(groups) == 0 {
 		return p
 	}
 
 	out := *p
-	out.Roles = mergeRoles(append([]string(nil), p.Roles...), groups)
+	out.Roles = mapping.MergeRoles(append([]string(nil), p.Roles...), groups)
 	return &out
 }

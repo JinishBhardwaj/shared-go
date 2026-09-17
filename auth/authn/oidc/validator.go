@@ -1,4 +1,7 @@
-package authn
+// Package oidc provides dynamic OIDC discovery / JWKS-verified bearer token
+// validation (OIDCValidator) plus ID-token-based group enrichment
+// (IDTokenGroupsEnricher), built on github.com/coreos/go-oidc/v3.
+package oidc
 
 import (
 	"context"
@@ -9,6 +12,8 @@ import (
 	"sync"
 	"time"
 
+	"github.com/JinishBhardwaj/shared-go/auth/authn"
+	"github.com/JinishBhardwaj/shared-go/auth/authn/mapping"
 	"github.com/JinishBhardwaj/shared-go/auth/principal"
 	"github.com/coreos/go-oidc/v3/oidc"
 	"github.com/golang-jwt/jwt/v5"
@@ -18,43 +23,6 @@ import (
 var (
 	ErrOIDCProviderInit = errors.New("authn: failed to initialize OIDC provider")
 )
-
-// AudienceValidator is a callback for dynamic audience/client acceptance
-// checks -- e.g. a runtime-onboarded M2M client list stored in a database,
-// which can't be expressed as a static AllowedAudiences slice at
-// validator-construction time because new entries are added after the
-// validator is already built. Mirrors ASP.NET Core's
-// TokenValidationParameters.AudienceValidator: audience acceptance is
-// authn's decision (rejects as ErrInvalidAudience, i.e. a 401), never
-// authz's (403) -- checking whether a client is currently ACTIVE/not-revoked,
-// or any other business-state decision, does not belong in this hook; that
-// is what authz.RequirementHandler is for.
-//
-// Deliberately receives the full parsed claims, not just an "aud" list:
-// AWS Cognito's own client_credentials (M2M) access tokens carry no "aud"
-// claim at all, only client_id -- the standard OIDC "audience" model
-// doesn't fit every real IdP/grant-type combination. claims.GetAudience()
-// works for callers with real "aud" claims; ExtractClientID(claims) covers
-// Cognito-style client_id/azp/cid tokens instead.
-//
-// Called only after cryptographic verification (signature/issuer/expiry)
-// has already succeeded, from ValidateToken's own goroutine -- it must not
-// block indefinitely or panic (same contract as OnDecision/OnAuthenticate
-// elsewhere in this module).
-//
-//   - Returning (true, nil) accepts the token.
-//   - Returning (false, nil) is a deliberate, definitive rejection (this
-//     audience/client is not accepted) -- fails closed, and never counts as
-//     a breaker failure: this is the callback doing its job correctly, not
-//     the callback failing.
-//   - Returning a non-nil error signals a transient failure of the check
-//     ITSELF (e.g. the backing database is unreachable), not a legitimate
-//     answer. Always treated as "not accepted" (fail closed, same as every
-//     other error path in this validator), but DOES count as a breaker
-//     failure, so a sustained backend outage opens the breaker and stops
-//     hammering the failing dependency instead of blocking every
-//     subsequent token validation on it.
-type AudienceValidator func(ctx context.Context, claims jwt.MapClaims) (bool, error)
 
 // OIDCValidatorConfig configures dynamic OIDC discovery and JWKS validation.
 type OIDCValidatorConfig struct {
@@ -81,8 +49,8 @@ type OIDCValidatorConfig struct {
 	// single-ClientID enforcement is skipped, even if ExpectedClientID is
 	// also set) so this callback always gets a chance to accept a token
 	// go-oidc's static check alone would have rejected. See
-	// AudienceValidator's own doc comment for its contract.
-	AudienceValidator AudienceValidator
+	// authn.AudienceValidator's own doc comment for its contract.
+	AudienceValidator authn.AudienceValidator
 
 	// AudienceValidatorTimeout bounds each AudienceValidator call with a
 	// context deadline, independent of the caller's own inbound context.
@@ -107,8 +75,8 @@ type OIDCValidatorConfig struct {
 	SupportedSigningAlgs []string
 
 	// Normalizer maps raw claims into the unified Identity context.
-	// Defaults to CognitoClaimsNormalizer if nil.
-	Normalizer ClaimsNormalizer
+	// Defaults to mapping.NewCognitoClaimsNormalizer() if nil.
+	Normalizer authn.ClaimsNormalizer
 
 	// CustomKeySetURL allows bypassing .well-known discovery and pointing directly to a JWKS URI. Optional.
 	CustomKeySetURL string
@@ -171,12 +139,13 @@ type OIDCValidatorConfig struct {
 	KidRateLimitBurst     int
 
 	// TypEnforcement controls RFC 9068 "typ: at+jwt" header enforcement.
-	// Defaults to TypEnforcementOff (the zero value). AWS Cognito access
-	// tokens do NOT set a typ header in their default configuration --
-	// enabling TypEnforcementStrict against Cognito will reject every
-	// token. See TypEnforcementMode's doc comment for the full explanation
-	// and TypEnforcementIfPresent for a safer opt-in shape.
-	TypEnforcement TypEnforcementMode
+	// Defaults to authn.TypEnforcementOff (the zero value). AWS Cognito
+	// access tokens do NOT set a typ header in their default configuration
+	// -- enabling authn.TypEnforcementStrict against Cognito will reject
+	// every token. See authn.TypEnforcementMode's doc comment for the full
+	// explanation and authn.TypEnforcementIfPresent for a safer opt-in
+	// shape.
+	TypEnforcement authn.TypEnforcementMode
 }
 
 // OIDCValidator uses github.com/coreos/go-oidc/v3 to perform dynamic OIDC discovery,
@@ -184,7 +153,7 @@ type OIDCValidatorConfig struct {
 type OIDCValidator struct {
 	provider         *oidc.Provider
 	verifier         *oidc.IDTokenVerifier
-	normalizer       ClaimsNormalizer
+	normalizer       authn.ClaimsNormalizer
 	expectedClientID string
 	allowedAudiences []string
 
@@ -196,7 +165,7 @@ type OIDCValidator struct {
 	// verifyBreaker guards for JWKS fetches. Not exposed as a public field,
 	// same "don't leak the breaker library into the public API" reasoning
 	// as verifyBreaker.
-	audienceValidator        AudienceValidator
+	audienceValidator        authn.AudienceValidator
 	audienceValidatorTimeout time.Duration
 	audienceValidatorBreaker *gobreaker.CircuitBreaker[bool]
 
@@ -216,7 +185,7 @@ type OIDCValidator struct {
 
 	// typEnforcement controls RFC 9068 "typ: at+jwt" header enforcement.
 	// See OIDCValidatorConfig.TypEnforcement.
-	typEnforcement TypEnforcementMode
+	typEnforcement authn.TypEnforcementMode
 }
 
 // discoveryBreakers is a package-level registry of one
@@ -299,7 +268,7 @@ func NewOIDCValidator(ctx context.Context, cfg OIDCValidatorConfig) (*OIDCValida
 
 	norm := cfg.Normalizer
 	if norm == nil {
-		norm = NewCognitoClaimsNormalizer()
+		norm = mapping.NewCognitoClaimsNormalizer()
 	}
 
 	// Tier 0 #4: audience enforcement must be explicit. A single
@@ -408,8 +377,8 @@ func NewOIDCValidator(ctx context.Context, cfg OIDCValidatorConfig) (*OIDCValida
 // unknown kid) is guarded by a per-validator circuit breaker and bounded by
 // VerifyTimeout (Tier 3 "breaker on JWKS fetch"). A breaker-open or
 // deadline-exceeded error surfaces identically to any other verification
-// failure below -- wrapped in ErrInvalidToken -- so neither can ever be
-// mistaken for, or silently degrade into, an accepted token.
+// failure below -- wrapped in authn.ErrInvalidToken -- so neither can ever
+// be mistaken for, or silently degrade into, an accepted token.
 func (v *OIDCValidator) ValidateToken(ctx context.Context, tokenStr string) (*principal.Principal, error) {
 	// Tier 3 JWKS hardening: gate unrecognized/recently-failed kids BEFORE
 	// calling the underlying verifier, so a flood of random-kid tokens
@@ -423,7 +392,7 @@ func (v *OIDCValidator) ValidateToken(ctx context.Context, tokenStr string) (*pr
 	now := time.Now()
 	if hasKid {
 		if ok, reason := v.kids.allow(kid, now); !ok {
-			return nil, fmt.Errorf("%w: %s", ErrInvalidToken, reason)
+			return nil, fmt.Errorf("%w: %s", authn.ErrInvalidToken, reason)
 		}
 	}
 
@@ -447,7 +416,7 @@ func (v *OIDCValidator) ValidateToken(ctx context.Context, tokenStr string) (*pr
 		if hasKid && isKeyResolutionFailure(err) {
 			v.kids.markBad(kid, now)
 		}
-		return nil, fmt.Errorf("%w: %v", ErrInvalidToken, err)
+		return nil, fmt.Errorf("%w: %v", authn.ErrInvalidToken, err)
 	}
 	if hasKid {
 		v.kids.markGood(kid)
@@ -457,15 +426,16 @@ func (v *OIDCValidator) ValidateToken(ctx context.Context, tokenStr string) (*pr
 	// defaults to off). Applied only after the signature above has already
 	// been verified (idToken came back with err == nil), since the typ
 	// header is part of the signed content and is only safe to trust once
-	// verification has succeeded. See TypEnforcementMode's doc comment for
-	// why this defaults to off (AWS Cognito does not set typ by default).
-	if err := enforceTyp(v.typEnforcement, tokenStr); err != nil {
+	// verification has succeeded. See authn.TypEnforcementMode's doc
+	// comment for why this defaults to off (AWS Cognito does not set typ by
+	// default).
+	if err := authn.EnforceTyp(v.typEnforcement, tokenStr); err != nil {
 		return nil, err
 	}
 
 	var rawClaims map[string]any
 	if err := idToken.Claims(&rawClaims); err != nil {
-		return nil, fmt.Errorf("%w: failed unmarshaling claims: %v", ErrInvalidToken, err)
+		return nil, fmt.Errorf("%w: failed unmarshaling claims: %v", authn.ErrInvalidToken, err)
 	}
 	claims := jwt.MapClaims(rawClaims)
 
@@ -475,15 +445,15 @@ func (v *OIDCValidator) ValidateToken(ctx context.Context, tokenStr string) (*pr
 	// instead -- accepted if the token matches ANY configured path: the
 	// static ExpectedClientID, the static AllowedAudiences set, or the
 	// dynamic AudienceValidator (given the full claims, not just "aud" --
-	// see AudienceValidator's doc comment for why). This must never be
-	// treated as optional: reaching this block with nothing configured on
-	// the struct would mean "no restriction was configured" (see
+	// see authn.AudienceValidator's doc comment for why). This must never
+	// be treated as optional: reaching this block with nothing configured
+	// on the struct would mean "no restriction was configured" (see
 	// NewOIDCValidator's warning log for that case), not "skip silently" --
 	// but NewOIDCValidator only ever populates these fields when at least
 	// one really was configured, so the guard below is never vacuously true.
 	if v.expectedClientID != "" || len(v.allowedAudiences) > 0 || v.audienceValidator != nil {
-		accepted := (v.expectedClientID != "" && audienceIntersects(idToken.Audience, []string{v.expectedClientID})) ||
-			(len(v.allowedAudiences) > 0 && audienceIntersects(idToken.Audience, v.allowedAudiences))
+		accepted := (v.expectedClientID != "" && authn.AudienceIntersects(idToken.Audience, []string{v.expectedClientID})) ||
+			(len(v.allowedAudiences) > 0 && authn.AudienceIntersects(idToken.Audience, v.allowedAudiences))
 
 		if !accepted && v.audienceValidator != nil {
 			actx, cancel := context.WithTimeout(ctx, v.audienceValidatorTimeout)
@@ -495,7 +465,7 @@ func (v *OIDCValidator) ValidateToken(ctx context.Context, tokenStr string) (*pr
 		}
 
 		if !accepted {
-			return nil, fmt.Errorf("%w: token audience %v not accepted", ErrInvalidAudience, idToken.Audience)
+			return nil, fmt.Errorf("%w: token audience %v not accepted", authn.ErrInvalidAudience, idToken.Audience)
 		}
 	}
 
@@ -517,7 +487,7 @@ func (v *OIDCValidator) VerifyClaims(ctx context.Context, tokenStr string) (jwt.
 	now := time.Now()
 	if hasKid {
 		if ok, reason := v.kids.allow(kid, now); !ok {
-			return nil, fmt.Errorf("%w: %s", ErrInvalidToken, reason)
+			return nil, fmt.Errorf("%w: %s", authn.ErrInvalidToken, reason)
 		}
 	}
 
@@ -531,7 +501,7 @@ func (v *OIDCValidator) VerifyClaims(ctx context.Context, tokenStr string) (jwt.
 		if hasKid && isKeyResolutionFailure(err) {
 			v.kids.markBad(kid, now)
 		}
-		return nil, fmt.Errorf("%w: %v", ErrInvalidToken, err)
+		return nil, fmt.Errorf("%w: %v", authn.ErrInvalidToken, err)
 	}
 	if hasKid {
 		v.kids.markGood(kid)
@@ -539,21 +509,9 @@ func (v *OIDCValidator) VerifyClaims(ctx context.Context, tokenStr string) (jwt.
 
 	var rawClaims map[string]any
 	if err := idToken.Claims(&rawClaims); err != nil {
-		return nil, fmt.Errorf("%w: failed unmarshaling claims: %v", ErrInvalidToken, err)
+		return nil, fmt.Errorf("%w: failed unmarshaling claims: %v", authn.ErrInvalidToken, err)
 	}
 	return jwt.MapClaims(rawClaims), nil
-}
-
-// audienceIntersects reports whether any of tokenAudiences appears in allowed.
-func audienceIntersects(tokenAudiences, allowed []string) bool {
-	for _, aud := range tokenAudiences {
-		for _, a := range allowed {
-			if aud == a {
-				return true
-			}
-		}
-	}
-	return false
 }
 
 // Provider returns the underlying coreos/go-oidc Provider (if initialized via discovery).

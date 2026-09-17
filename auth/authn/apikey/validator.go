@@ -1,11 +1,10 @@
-package authn
+package apikey
 
 import (
 	"context"
 	"errors"
 	"time"
 
-	"github.com/JinishBhardwaj/shared-go/auth/authn/apikeys"
 	"github.com/JinishBhardwaj/shared-go/auth/principal"
 )
 
@@ -15,7 +14,7 @@ var (
 
 // APIKeyStore abstracts storage lookup for API keys.
 type APIKeyStore interface {
-	Lookup(ctx context.Context, keyHash string) (*apikeys.APIKeyRecord, error)
+	Lookup(ctx context.Context, keyHash string) (*APIKeyRecord, error)
 }
 
 // APIKeyValidator validates raw API keys against an APIKeyStore.
@@ -34,10 +33,10 @@ func NewAPIKeyValidator(store APIKeyStore) (*APIKeyValidator, error) {
 // ValidateKey hashes the provided raw key, checks the store, and converts the record to a Principal.
 func (v *APIKeyValidator) ValidateKey(ctx context.Context, rawKey string) (*principal.Principal, error) {
 	if rawKey == "" {
-		return nil, apikeys.ErrAPIKeyNotFound
+		return nil, ErrAPIKeyNotFound
 	}
 
-	keyHash := apikeys.HashAPIKey(rawKey)
+	keyHash := HashAPIKey(rawKey)
 	record, err := v.store.Lookup(ctx, keyHash)
 	if err != nil {
 		return nil, err

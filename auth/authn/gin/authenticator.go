@@ -6,7 +6,7 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/JinishBhardwaj/shared-go/auth/authn"
+	"github.com/JinishBhardwaj/shared-go/auth/authn/bearer"
 	"github.com/JinishBhardwaj/shared-go/auth/principal"
 	"github.com/gin-gonic/gin"
 )
@@ -74,7 +74,7 @@ type CompositeAuthenticatorConfig struct {
 	BearerValidator BearerTokenValidator
 
 	// JWTValidator is a convenience alias for BearerValidator.
-	JWTValidator *authn.JWTValidator
+	JWTValidator *bearer.JWTValidator
 
 	// APIKeyValidator validates incoming API keys.
 	APIKeyValidator KeyValidator

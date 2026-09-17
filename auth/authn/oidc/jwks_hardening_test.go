@@ -1,4 +1,4 @@
-package authn
+package oidc
 
 import (
 	"context"

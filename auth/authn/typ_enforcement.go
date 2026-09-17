@@ -111,10 +111,12 @@ func extractHeaderTyp(tokenStr string) (typ string, present bool) {
 	return s, true
 }
 
-// enforceTyp applies mode to tokenStr's typ header, per TypEnforcementMode's
+// EnforceTyp applies mode to tokenStr's typ header, per TypEnforcementMode's
 // own doc comments. Callers MUST only call this after tokenStr's signature
-// has already been verified -- see extractHeaderTyp.
-func enforceTyp(mode TypEnforcementMode, tokenStr string) error {
+// has already been verified -- see extractHeaderTyp. Exported so
+// authn/oidc and authn/bearer's own validators (in separate packages) can
+// call it after their own signature verification succeeds.
+func EnforceTyp(mode TypEnforcementMode, tokenStr string) error {
 	if mode == TypEnforcementOff {
 		return nil
 	}
